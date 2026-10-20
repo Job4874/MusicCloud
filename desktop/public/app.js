@@ -22,6 +22,7 @@ function fillIcons(root=document) { root.querySelectorAll('[data-icon]').forEach
 fillIcons();
 let library={tracks:[],favorites:[],playlists:[],stats:{bytes:0}}, view='library', albumFilter=null, search='', queue=[], currentId=null, shuffle=false, repeat='off', uploading=false, exportInfo=null;
 let catalogs=[],catalogId=null,catalogDetail=null,catalogLoading=false,catalogError='',catalogImporting=false,catalogPage=0,refreshGeneration=0;
+let libraryLoaded=false,activeRefreshes=0,activeMutations=0,pendingStateWrites=0,mutationRevision=0,backgroundRefreshRunning=false,backgroundRefreshTimer;
 const CATALOG_PAGE_SIZE=250, MAX_CATALOG_UPLOAD=100*1024*1024;
 const audio=$('#audio'); audio.volume=.8;
 const trackById = id => library.tracks.find(t=>t.id===id);
@@ -31,18 +32,67 @@ const hash = s => [...String(s)].reduce((n,c)=>(n*31+c.charCodeAt(0))>>>0,0);
 const art = (track,cls='') => `<div class="art art-${hash(track?.album||track?.title||'MusicCloud')%6} ${cls}"><span>${esc((track?.album||track?.title||'mc').slice(0,2))}</span></div>`;
 let toastTimer;
 function toast(message,error=false) {const el=$('#toast');el.textContent=message;el.className=`visible${error?' error':''}`;clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.className='',error?7000:4200);}
-async function api(path,options={}) {const response=await fetch(path,{...options,headers:{'X-MusicCloud':'1',...(options.body&&typeof options.body==='string'?{'Content-Type':'application/json'}:{}),...options.headers}}); const result=await response.json();if(!response.ok)throw new Error(result.error||`Request failed (${response.status})`);return result;}
+async function api(path,options={}) {
+ const mutation=!['GET','HEAD'].includes((options.method||'GET').toUpperCase());
+ if(mutation){activeMutations++;mutationRevision++;}
+ try{const response=await fetch(path,{...options,headers:{'X-MusicCloud':'1',...(options.body&&typeof options.body==='string'?{'Content-Type':'application/json'}:{}),...options.headers}});const result=await response.json();if(!response.ok)throw new Error(result.error||`Request failed (${response.status})`);return result;}
+ finally{if(mutation)activeMutations--;}
+}
 async function refresh() {
- const generation=++refreshGeneration;
- const [nextLibrary,nextCatalogs]=await Promise.all([api('/api/library'),api('/api/catalogs')]);
- if(generation!==refreshGeneration)return;
- library=nextLibrary;catalogs=nextCatalogs.catalogs;
- const selected=catalogId;
- if(selected){const detail=await api(`/api/catalogs/${encodeURIComponent(selected)}`);if(generation!==refreshGeneration)return;if(catalogId===selected){catalogDetail=detail;catalogError='';catalogLoading=false;}}
- render();updatePlayer();
+ const generation=++refreshGeneration;activeRefreshes++;
+ try{
+  const [nextLibrary,nextCatalogs]=await Promise.all([api('/api/library'),api('/api/catalogs')]);
+  if(generation!==refreshGeneration)return;
+  library=nextLibrary;catalogs=nextCatalogs.catalogs;libraryLoaded=true;
+  const selected=catalogId;
+  if(selected){const detail=await api(`/api/catalogs/${encodeURIComponent(selected)}`);if(generation!==refreshGeneration)return;if(catalogId===selected){catalogDetail=detail;catalogError='';catalogLoading=false;}}
+  render();updatePlayer();
+ }finally{activeRefreshes--;}
 }
 let stateWrites=Promise.resolve();
-function saveState(change) {const pending=stateWrites.catch(()=>{}).then(async()=>{const next=change(library);library=await api('/api/state',{method:'PUT',body:JSON.stringify({favorites:next.favorites??library.favorites,playlists:next.playlists??library.playlists})});render();updatePlayer();});stateWrites=pending;return pending;}
+function saveState(change) {pendingStateWrites++;mutationRevision++;const pending=stateWrites.catch(()=>{}).then(async()=>{const next=change(library);library=await api('/api/state',{method:'PUT',body:JSON.stringify({favorites:next.favorites??library.favorites,playlists:next.playlists??library.playlists})});render();updatePlayer();}).finally(()=>{pendingStateWrites--;});stateWrites=pending;return pending;}
+
+function backgroundRefreshAllowed(){
+ const focused=document.activeElement;
+ return document.visibilityState==='visible'&&!uploading&&!catalogImporting&&!catalogLoading&&!activeRefreshes&&!activeMutations&&!pendingStateWrites&&!$('#dialog').open&&$('#drop-zone').hidden
+  &&!focused?.matches('input:not([type="range"]),textarea,select')&&!focused?.isContentEditable;
+}
+function renderBackgroundChanges(libraryChanged){
+ const position={x:window.scrollX,y:window.scrollY};
+ const scrolls=['#main','#playlist-nav','#content .table-wrap'].flatMap(selector=>[...document.querySelectorAll(selector)].map((element,index)=>({selector,index,left:element.scrollLeft,top:element.scrollTop})));
+ const expanded=[...document.querySelectorAll('#content details')].map(element=>element.open);
+ const focused=document.activeElement;
+ const focusSelector=focused?.id?`#${CSS.escape(focused.id)}`:focused?.dataset.action?['data-action','data-id','data-track','data-album'].filter(name=>focused.hasAttribute(name)).map(name=>`[${name}="${CSS.escape(focused.getAttribute(name))}"]`).join(''):null;
+ // The persistent audio element, its source/time, and the listening queue stay intact.
+ render();if(libraryChanged)updatePlayer();
+ document.querySelectorAll('#content details').forEach((element,index)=>{if(index<expanded.length)element.open=expanded[index];});
+ if(focused&&!focused.isConnected&&focusSelector)document.querySelector(focusSelector)?.focus({preventScroll:true});
+ for(const entry of scrolls){const element=document.querySelectorAll(entry.selector)[entry.index];if(element){element.scrollLeft=entry.left;element.scrollTop=entry.top;}}
+ window.scrollTo(position.x,position.y);
+}
+async function refreshInBackground(){
+ if(backgroundRefreshRunning||!backgroundRefreshAllowed())return;
+ backgroundRefreshRunning=true;
+ const generation=refreshGeneration,revision=mutationRevision,selected=view==='catalogs'?catalogId:null;
+ const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),8000);
+ try{
+  const options={signal:controller.signal};
+  const [nextLibrary,nextCatalogs]=await Promise.all([api('/api/library',options),api('/api/catalogs',options)]);
+  if(!backgroundRefreshAllowed()||generation!==refreshGeneration||revision!==mutationRevision)return;
+  const libraryChanged=!libraryLoaded||JSON.stringify(nextLibrary)!==JSON.stringify(library);
+  const catalogsChanged=JSON.stringify(nextCatalogs.catalogs)!==JSON.stringify(catalogs);
+  let detail=null;
+  if(selected&&(libraryChanged||catalogsChanged||catalogError))detail=await api(`/api/catalogs/${encodeURIComponent(selected)}`,options);
+  if(!backgroundRefreshAllowed()||generation!==refreshGeneration||revision!==mutationRevision||selected!==(view==='catalogs'?catalogId:null))return;
+  const detailChanged=detail&&(catalogError||JSON.stringify(detail)!==JSON.stringify(catalogDetail));
+  if(!libraryChanged&&!catalogsChanged&&!detailChanged)return;
+  ++refreshGeneration;library=nextLibrary;catalogs=nextCatalogs.catalogs;libraryLoaded=true;
+  if(detail){catalogDetail=detail;catalogError='';}
+  renderBackgroundChanges(libraryChanged);
+ }catch{/* Keep the current music and view; retry on the next visible poll or focus. */}
+ finally{controller.abort();clearTimeout(timeout);backgroundRefreshRunning=false;}
+}
+function scheduleBackgroundRefresh(){clearTimeout(backgroundRefreshTimer);backgroundRefreshTimer=setTimeout(refreshInBackground,200);}
 function filteredTracks() {
  let tracks=library.tracks;
  if(view==='favorites')tracks=tracks.filter(t=>library.favorites.includes(t.id));
@@ -251,4 +301,9 @@ audio.addEventListener('play',updatePlayer);audio.addEventListener('pause',updat
 document.addEventListener('keydown',e=>{if(e.target.matches('input,textarea,select')||$('#dialog').open)return;if(e.key==='/'){e.preventDefault();$('#search').focus();}if(e.code==='Space'&&!e.target.closest('button,a')){e.preventDefault();togglePlay().catch(e=>toast(e.message,true));}});
 let dragDepth=0;document.addEventListener('dragenter',e=>{if(e.dataTransfer?.types.includes('Files')){e.preventDefault();dragDepth++;$('#drop-zone').hidden=false;}});document.addEventListener('dragover',e=>{if(e.dataTransfer?.types.includes('Files'))e.preventDefault();});document.addEventListener('dragleave',()=>{dragDepth=Math.max(0,dragDepth-1);if(!dragDepth)$('#drop-zone').hidden=true;});document.addEventListener('drop',e=>{e.preventDefault();dragDepth=0;$('#drop-zone').hidden=true;const files=e.dataTransfer?.files;if(!files?.length)return;if(view==='catalogs'&&files.length===1&&files[0].name.toLowerCase().endsWith('.json'))importCatalog(files[0]).catch(()=>toast('The playlist report could not be imported.',true));else upload(files).catch(e=>toast(e.message,true));});
 if('mediaSession'in navigator){for(const [name,handler]of Object.entries({play:()=>audio.play().catch(()=>{}),pause:()=>audio.pause(),previoustrack:()=>advance(-1),nexttrack:()=>advance(1),seekto:e=>{if(Number.isFinite(e.seekTime))audio.currentTime=e.seekTime;}})){try{navigator.mediaSession.setActionHandler(name,handler);}catch{}}}
+setInterval(refreshInBackground,12000);
+window.addEventListener('focus',scheduleBackgroundRefresh);
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')scheduleBackgroundRefresh();});
+document.addEventListener('focusout',event=>{if(event.target.matches('input,textarea,select')||event.target.isContentEditable)scheduleBackgroundRefresh();});
+$('#dialog').addEventListener('close',scheduleBackgroundRefresh);
 refresh().catch(e=>{$('#content').innerHTML=`<div class="empty-state"><h3>MusicCloud could not load</h3><p>${esc(e.message)}. Keep the local server running and reload this page.</p></div>`;});

@@ -1,0 +1,19 @@
+# Prepared locally. Connect a provider or upload this file only after user approval.
+# Manual only: no triggering events, scheduled builds, signing, or publishing.
+workflows:
+  musiccloud-iphone-unsigned:
+    name: MusicCloud unsigned iPhone (manual)
+    instance_type: mac_mini_m2
+    max_build_duration: 15
+    environment:
+      xcode: latest
+    scripts:
+      - name: Check original model behavior
+        script: bash iphone/check-models.sh
+      - name: Compile native app and package unsigned IPA
+        script: |
+          set -euo pipefail
+          bash iphone/build-unsigned.sh
+          test -s iphone/build/MusicCloud-unsigned.ipa
+    artifacts:
+      - iphone/build/MusicCloud-unsigned.ipa

@@ -20,7 +20,9 @@ The iPhone app is the native project in **iphone/MusicCloud.xcodeproj**, targeti
 
 Windows cannot compile this Swift/iOS project locally. The included manual **Build iPhone app** workflow at **.github/workflows/build-iphone.yml** can compile it on a standard remote macOS runner in a private GitHub repository. It uses no signing secrets and uploads only a private unsigned build artifact, **MusicCloud-unsigned-ipa**, containing **MusicCloud-unsigned.ipa**. The workflow has no automatic or scheduled trigger and retains its build for one day.
 
-Use only available included free runner allowance, with paid overage disabled. Do not add a payment method or select a paid runner for this project. If free build allowance is unavailable, retain the source and stop before incurring charges. No remote repository or workflow run has been set up by this delivery.
+Use only available included free runner allowance, with paid overage disabled. Do not add a payment method or select a paid runner for this project. If free build allowance is unavailable, retain the source and stop before incurring charges. Keep the source repository private and dispatch the workflow manually after checking the included allowance.
+
+An alternative manual macOS build workflow is prepared in **codemagic.yaml**; see **docs/CODEMAGIC-FALLBACK.md**. Its presence does not mean an account is connected or a build has succeeded. Either build route produces the same unsigned app for Windows USB installation; the installed player does not depend on the build service.
 
 After a successful build, Windows AltServer can sign and install the IPA while your iPhone is connected by USB. You enter your Apple Account in that installer yourself. Apple's free personal signing requires renewal every seven days. The app's offline audio does not need another code build when you add songs.
 

@@ -5,6 +5,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -93,7 +95,7 @@ class AudioTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
             result = audio.import_manifests([manifest()], Path(temporary), {}, API(), limit=3,
-                downloader=downloader, max_consecutive_failures=2)
+                downloader=downloader, max_consecutive_failures=2, workers=1)
         self.assertEqual(calls, [FIRST, SECOND])
         self.assertTrue(result["paused"])
         self.assertEqual(result["pauseReason"], "rate-limited")
@@ -102,6 +104,48 @@ class AudioTests(unittest.TestCase):
         self.assertEqual(remaining["status"], "pending")
         self.assertEqual(remaining["reason"], "paused-after-consecutive-failures")
 
+    def test_downloads_overlap_but_api_and_report_have_one_coordinator(self):
+        coordinator = threading.get_ident()
+        barrier = threading.Barrier(3)
+        worker_threads = set()
+        recorded = []
+
+        def downloader(identifier, directory, tools, deadline):
+            worker_threads.add(threading.get_ident())
+            barrier.wait(timeout=3)
+            return directory / (identifier + ".m4a"), {"sha256": "a" * 64, "bytes": 12, "duration": 5}, False
+
+        class SerialAPI(API):
+            def import_audio(self, *args):
+                self_thread = threading.get_ident()
+                if self_thread != coordinator:
+                    raise AssertionError("API mutation left the coordinator")
+                return TRACK
+
+        def writer(path, value):
+            self.assertEqual(threading.get_ident(), coordinator)
+            recorded.append(json.loads(json.dumps(value)))
+
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            result = audio.import_manifests([manifest()], Path(temporary), {}, SerialAPI(), limit=3,
+                downloader=downloader, writer=writer, workers=3)
+        self.assertEqual(len(worker_threads), 3)
+        self.assertNotIn(coordinator, worker_threads)
+        self.assertEqual(result["importedUnique"], 3)
+        self.assertEqual(recorded[-1], result)
+
+    def test_process_cancellation_stops_owned_work_promptly(self):
+        cancelled = threading.Event()
+        timer = threading.Timer(0.1, cancelled.set)
+        timer.start()
+        started = time.monotonic()
+        try:
+            with self.assertRaisesRegex(audio.ImportFailure, "^batch-paused$"):
+                audio.execute([sys.executable, "-c", "import time; time.sleep(20)"], 20, cancelled)
+        finally:
+            timer.cancel()
+        self.assertLess(time.monotonic() - started, 3)
+
     def test_download_failure_never_exports_raw_diagnostics(self):
         secret = "https://example.invalid/?secret=do-not-export"
 
@@ -109,6 +153,9 @@ class AudioTests(unittest.TestCase):
             self.assertIn("--ignore-config", arguments)
             self.assertIn("--no-cookies-from-browser", arguments)
             self.assertIn("--no-plugin-dirs", arguments)
+            self.assertNotIn("--sleep-requests", arguments)
+            self.assertNotIn("--sleep-interval", arguments)
+            self.assertNotIn("--limit-rate", arguments)
             self.assertEqual(arguments[-1], "https://www.youtube.com/watch?v=" + FIRST)
             return subprocess.CompletedProcess(arguments, 1, "", "HTTP error 403 " + secret)
 
@@ -120,6 +167,12 @@ class AudioTests(unittest.TestCase):
     def test_timeout_has_fixed_safe_reason(self):
         with self.assertRaisesRegex(audio.ImportFailure, "^process-timeout$"):
             audio.execute([sys.executable, "-c", "import time; time.sleep(10)"], 0.1)
+
+    def test_network_failures_have_fixed_codes_without_raw_connection_details(self):
+        self.assertEqual(audio.failure_reason("getaddrinfo failed: private-detail"), "dns-resolution-failed")
+        self.assertEqual(audio.failure_reason("Connection reset by peer: private-detail"), "connection-reset")
+        self.assertEqual(audio.failure_reason("Read timed out for https://private.invalid/?key=secret"), "network-timeout")
+        self.assertEqual(audio.failure_reason("Requested format is not available"), "no-playable-stream")
 
     @unittest.skipUnless(os.name == "nt", "Windows process job behavior")
     def test_windows_timeout_terminates_owned_descendant(self):

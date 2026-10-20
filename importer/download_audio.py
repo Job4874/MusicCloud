@@ -1,6 +1,7 @@
 """Optional ordinary-stream import. No account, browser, DRM or cache access."""
 
 import argparse
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import hashlib
 import http.client
 import json
@@ -10,6 +11,8 @@ import re
 import signal
 import subprocess
 import sys
+import threading
+import time
 import uuid
 from pathlib import Path
 from urllib.parse import quote
@@ -150,7 +153,7 @@ class WindowsJob:
             self.handle = None
 
 
-def execute(arguments, timeout):
+def execute(arguments, timeout, cancel_event=None):
     job = WindowsJob() if os.name == "nt" else None
     process = None
     try:
@@ -159,15 +162,22 @@ def execute(arguments, timeout):
                                    creationflags=4 if job else 0, start_new_session=not bool(job))
         if job:
             job.start(process)
-        try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            if job:
-                job.terminate()
-            else:
-                os.killpg(process.pid, signal.SIGKILL)
-            process.communicate(timeout=10)
-            raise ImportFailure("process-timeout") from None
+        expires = time.monotonic() + timeout
+        while True:
+            cancelled = cancel_event is not None and cancel_event.is_set()
+            remaining = expires - time.monotonic()
+            if cancelled or remaining <= 0:
+                if job:
+                    job.terminate()
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.communicate(timeout=10)
+                raise ImportFailure("batch-paused" if cancelled else "process-timeout") from None
+            try:
+                stdout, stderr = process.communicate(timeout=min(remaining, 0.25) if cancel_event else remaining)
+                break
+            except subprocess.TimeoutExpired:
+                continue
         return subprocess.CompletedProcess(arguments, process.returncode, stdout, stderr)
     except OSError:
         raise ImportFailure("tool-start-failed") from None
@@ -200,7 +210,14 @@ def verify_audio(path, ffprobe, runner=execute):
 def failure_reason(stderr):
     # Never copy the tool's raw diagnostics, URLs, headers or response bodies.
     text = stderr.lower()
-    for needle, reason in [("drm", "protected-stream"), ("private video", "private-video"),
+    for needle, reason in [("getaddrinfo failed", "dns-resolution-failed"), ("no such host", "dns-resolution-failed"),
+                           ("timed out", "network-timeout"), ("connection reset", "connection-reset"),
+                           ("connection refused", "connection-refused"), ("network is unreachable", "network-unreachable"),
+                           ("remote end closed connection", "remote-disconnected"),
+                           ("certificate_verify_failed", "certificate-validation-failed"),
+                           ("requested format is not available", "no-playable-stream"),
+                           ("not a bot", "interactive-verification-required"),
+                           ("drm", "protected-stream"), ("private video", "private-video"),
                            ("sign in", "sign-in-required"), ("not available", "unavailable-stream"),
                            ("removed", "removed-video"), ("429", "rate-limited"),
                            ("403", "stream-access-denied"), ("no video formats", "no-playable-stream")]:
@@ -212,13 +229,17 @@ def failure_reason(stderr):
 def download(video_id, directory, tools, deadline, runner=execute):
     if not VIDEO_ID.fullmatch(video_id):
         raise ImportFailure("invalid-video-id")
+    if runner is execute and tools.get("cancel_event") is not None:
+        runner = lambda arguments, timeout: execute(arguments, timeout, tools["cancel_event"])
     target = directory / (video_id + ".m4a")
     if target.exists() or target.is_symlink():
         if target.is_symlink() or not target.is_file():
             raise ImportFailure("unsafe-existing-audio-path")
         try:
             information = verify_audio(target, tools["ffprobe"], runner)
-        except ImportFailure:
+        except ImportFailure as error:
+            if str(error) not in {"audio-verification-failed", "missing-or-invalid-audio-file"}:
+                raise
             # Preserve damaged final output instead of replacing it or trapping
             # every future resume in the same failed verification.
             quarantine = directory / "quarantine"
@@ -234,7 +255,7 @@ def download(video_id, directory, tools, deadline, runner=execute):
                  "--no-js-runtimes", "--js-runtimes", "node:" + str(tools["node"]),
                  "--ffmpeg-location", str(tools["ffmpeg"].parent), "--retries", "2", "--fragment-retries", "2",
                  "--extractor-retries", "2", "--socket-timeout", "20", "--abort-on-unavailable-fragments",
-                 "--max-filesize", str(MAX_AUDIO_BYTES), "--sleep-requests", "1", "--sleep-interval", "5",
+                 "--max-filesize", str(MAX_AUDIO_BYTES),
                  "-f", "ba[ext=m4a]/ba", "-x", "--audio-format", "m4a", "--audio-quality", "192K",
                  "--embed-metadata", "--no-write-info-json", "--no-write-thumbnail",
                  "-P", str(directory), "-P", "temp:" + str(directory / "partial"), "-o", "%(id)s.%(ext)s",
@@ -304,7 +325,7 @@ class LocalMusicCloud:
 
 
 def import_manifests(manifests, directory, tools, api, limit=1, deadline=240,
-                     downloader=download, writer=atomic_json, max_consecutive_failures=5):
+                     downloader=download, writer=atomic_json, max_consecutive_failures=5, workers=4):
     for manifest in manifests:
         validate_manifest(manifest)
     selected = {}
@@ -314,7 +335,7 @@ def import_manifests(manifests, directory, tools, api, limit=1, deadline=240,
             if identifier and entry["available"] is not False and identifier not in selected and len(selected) < limit:
                 selected[identifier] = entry
     outcomes = {}
-    report = {"schema": "musiccloud.audio-import.v1", "source": "youtube-music", "limit": limit,
+    report = {"schema": "musiccloud.audio-import.v1", "source": "youtube-music", "limit": limit, "workers": workers,
               "sourceComplete": all(item["complete"] is True for item in manifests), "complete": False,
               "attemptedUnique": 0, "importedUnique": 0, "failedUnique": 0, "paused": False,
               "pauseReason": None, "playlists": []}
@@ -350,28 +371,57 @@ def import_manifests(manifests, directory, tools, api, limit=1, deadline=240,
 
     api.ready()
     snapshot()
-    for identifier, entry in selected.items():
-        try:
-            path, information, reused = downloader(identifier, directory, tools, deadline)
-            track_id = api.import_audio(path, information, entry)
-            outcomes[identifier] = {"status": "imported", "fileName": path.name, "sha256": information["sha256"],
-                                    "duration": information["duration"], "bytes": information["bytes"],
-                                    "reusedDownload": reused, "trackId": track_id}
-            consecutive_failures = 0
-        except ImportFailure as error:
-            outcomes[identifier] = {"status": "failed", "reason": str(error)}
-            consecutive_failures += 1
-        except (OSError, ValueError, TypeError, KeyError):
-            outcomes[identifier] = {"status": "failed", "reason": "local-processing-failed"}
-            consecutive_failures += 1
-        if consecutive_failures >= max_consecutive_failures:
-            report["paused"] = True
-            report["pauseReason"] = outcomes[identifier]["reason"]
-        snapshot()
-        print(json.dumps({"videoId": identifier, "status": outcomes[identifier]["status"],
-                          "importedUnique": report["importedUnique"], "failedUnique": report["failedUnique"]}), flush=True)
-        if report["paused"]:
-            break
+    cancel_event = threading.Event()
+    worker_tools = {**tools, "cancel_event": cancel_event}
+    remaining = iter(selected)
+    pending = {}
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="musiccloud-download")
+
+    def fill_workers():
+        while len(pending) < workers and not cancel_event.is_set():
+            identifier = next(remaining, None)
+            if identifier is None:
+                break
+            future = pool.submit(downloader, identifier, directory, worker_tools, deadline)
+            pending[future] = identifier
+
+    try:
+        fill_workers()
+        while pending and not report["paused"]:
+            completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in completed:
+                identifier = pending.pop(future)
+                entry = selected[identifier]
+                try:
+                    path, information, reused = future.result()
+                    # This coordinator alone mutates the API, source-ID union,
+                    # outcomes and report. Workers only download/verify files.
+                    track_id = api.import_audio(path, information, entry)
+                    outcomes[identifier] = {"status": "imported", "fileName": path.name, "sha256": information["sha256"],
+                                            "duration": information["duration"], "bytes": information["bytes"],
+                                            "reusedDownload": reused, "trackId": track_id}
+                    consecutive_failures = 0
+                except ImportFailure as error:
+                    outcomes[identifier] = {"status": "failed", "reason": str(error)}
+                    consecutive_failures += 1
+                except (OSError, ValueError, TypeError, KeyError):
+                    outcomes[identifier] = {"status": "failed", "reason": "local-processing-failed"}
+                    consecutive_failures += 1
+                if consecutive_failures >= max_consecutive_failures:
+                    report["paused"] = True
+                    report["pauseReason"] = outcomes[identifier]["reason"]
+                    cancel_event.set()
+                snapshot()
+                print(json.dumps({"videoId": identifier, "status": outcomes[identifier]["status"],
+                                  "importedUnique": report["importedUnique"], "failedUnique": report["failedUnique"]}), flush=True)
+                if report["paused"]:
+                    break
+            fill_workers()
+    finally:
+        cancel_event.set()
+        for future in pending:
+            future.cancel()
+        pool.shutdown(wait=True, cancel_futures=True)
     return report
 
 
@@ -395,9 +445,10 @@ def main(argv=None):
     parser.add_argument("--deadline", type=int, default=240, help="Seconds allowed per download process.")
     parser.add_argument("--max-consecutive-failures", type=int, default=5,
                         help="Pause rather than make further requests after this many consecutive failed IDs.")
+    parser.add_argument("--workers", type=int, default=4, help="Concurrent download workers; API/report writes stay serial.")
     args = parser.parse_args(argv)
     try:
-        if not 1 <= args.port <= 65535 or not 1 <= args.limit <= 10000 or not 30 <= args.deadline <= 1800 or not 1 <= args.max_consecutive_failures <= 100:
+        if not 1 <= args.port <= 65535 or not 1 <= args.limit <= 10000 or not 30 <= args.deadline <= 1800 or not 1 <= args.max_consecutive_failures <= 100 or not 1 <= args.workers <= 32:
             raise ImportFailure("invalid-run-bounds")
         tools = {name: tool_file(getattr(args, name)) for name in ["yt_dlp", "node", "ffmpeg", "ffprobe"]}
         if file_hash(tools["yt_dlp"]) != OFFICIAL_SHA256:
@@ -419,7 +470,7 @@ def main(argv=None):
             raise ImportFailure("manifest-output-collision")
         manifests = [validate_manifest(read_json(path)) for path in inputs]
         report = import_manifests(manifests, directory, tools, LocalMusicCloud(args.port), args.limit, args.deadline,
-                                  max_consecutive_failures=args.max_consecutive_failures)
+                                  max_consecutive_failures=args.max_consecutive_failures, workers=args.workers)
         print(json.dumps({key: report[key] for key in ["attemptedUnique", "importedUnique", "failedUnique", "complete", "paused", "pauseReason"]}))
         if report["paused"]:
             return 3
