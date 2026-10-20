@@ -32,6 +32,26 @@ def manifest():
     ]}, "LM")
 
 
+def previous_report(source, failures=None):
+    failures = failures or {}
+    rows = []
+    for entry in source["entries"]:
+        outcome = ({"status": "failed", "reason": failures[entry["videoId"]]}
+                   if entry["videoId"] in failures else
+                   {"status": "unavailable", "reason": "source-marked-unavailable"}
+                   if entry["available"] is False else
+                   {"status": "deferred", "reason": "outside-current-limit"})
+        rows.append({key: entry[key] for key in ["position", "videoId", "title", "artists"]} | outcome)
+    return {"schema": "musiccloud.audio-import.v1", "source": "youtube-music",
+            "limit": 3, "sourceComplete": source["complete"], "complete": False,
+            "attemptedUnique": len(failures), "importedUnique": 0, "failedUnique": len(failures),
+            "paused": False, "pauseReason": None,
+            "playlists": [{"playlistId": source["playlistId"], "title": source["title"],
+                           "reportedCount": source["reportedCount"],
+                           "extractedCount": source["extractedCount"],
+                           "sourceComplete": source["complete"], "entries": rows}]}
+
+
 class API:
     def __init__(self):
         self.calls = []
@@ -45,6 +65,80 @@ class API:
 
 
 class AudioTests(unittest.TestCase):
+    def test_previous_failure_skips_download_without_advancing_live_failure_pause(self):
+        source = manifest()
+        prior = previous_report(source, {FIRST: "stream-access-denied"})
+        calls = []
+        api = API()
+
+        def downloader(identifier, directory, tools, deadline):
+            calls.append(identifier)
+            if identifier == SECOND:
+                raise audio.ImportFailure("download-failed")
+            return directory / (identifier + ".m4a"), {"sha256": "a" * 64, "bytes": 12, "duration": 5}, False
+
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            result = audio.import_manifests([source], Path(temporary), {}, api, limit=3,
+                downloader=downloader, previous_report=prior, max_consecutive_failures=2, workers=1)
+        self.assertEqual(calls, [SECOND, THIRD])
+        self.assertEqual(api.calls, [THIRD + ".m4a"])
+        self.assertEqual(result["skippedPreviousFailures"], 1)
+        self.assertFalse(result["paused"], "A carried failure must not count toward this run's pause threshold.")
+        rows = result["playlists"][0]["entries"]
+        self.assertEqual([row["position"] for row in rows], [1, 2, 3, 4, 5])
+        self.assertEqual([row["status"] for row in rows], ["failed", "failed", "failed", "imported", "unavailable"])
+        for row in rows[:2]:
+            self.assertEqual(row["reason"], "stream-access-denied")
+            self.assertIs(row["previousFailure"], True)
+        self.assertNotIn("previousFailure", rows[2])
+
+    def test_previous_failure_does_not_trust_unknown_reason_changed_identity_or_import_conflict(self):
+        source = manifest()
+        for alteration in ["unknown-reason", "changed-title", "changed-artists", "imported-conflict"]:
+            with self.subTest(alteration=alteration):
+                prior = previous_report(source, {FIRST: "stream-access-denied", SECOND: "download-failed"})
+                rows = prior["playlists"][0]["entries"]
+                if alteration == "unknown-reason":
+                    for row in rows[:2]:
+                        row["reason"] = "https://private.invalid/?secret=injected"
+                elif alteration == "changed-title":
+                    for row in rows[:2]:
+                        row["title"] = "Unrelated recording"
+                elif alteration == "changed-artists":
+                    for row in rows[:2]:
+                        row["artists"] = ["Unrelated artist"]
+                else:
+                    rows[1] = {key: rows[1][key] for key in ["position", "videoId", "title", "artists"]} | {
+                        "status": "imported", "trackId": TRACK}
+                outcomes = audio.previous_failure_outcomes(prior, [source], {FIRST, SECOND})
+                self.assertNotIn(FIRST, outcomes)
+                self.assertEqual(outcomes[SECOND], {
+                    "status": "failed", "reason": "download-failed", "previousFailure": True})
+                self.assertNotIn("injected", json.dumps(outcomes))
+
+    def test_previous_failure_respects_current_selection_availability_playlist_and_report_structure(self):
+        source = manifest()
+        prior = previous_report(source, {FIRST: "stream-access-denied", SECOND: "download-failed"})
+        self.assertEqual(set(audio.previous_failure_outcomes(prior, [source], {SECOND})), {SECOND})
+        unavailable = json.loads(json.dumps(source))
+        for entry in unavailable["entries"][:2]:
+            entry["available"] = False
+        self.assertEqual(audio.previous_failure_outcomes(prior, [unavailable], {FIRST}), {})
+        another_playlist = json.loads(json.dumps(source))
+        another_playlist["playlistId"] = "DifferentPlaylist"
+        self.assertEqual(audio.previous_failure_outcomes(prior, [another_playlist], {FIRST}), {})
+        for alteration in ["schema", "positions", "artists"]:
+            with self.subTest(malformed=alteration):
+                invalid = json.loads(json.dumps(prior))
+                if alteration == "schema":
+                    invalid["schema"] = "untrusted-report.v1"
+                elif alteration == "positions":
+                    invalid["playlists"][0]["entries"][1]["position"] = 1
+                else:
+                    invalid["playlists"][0]["entries"][0]["artists"] = "Original"
+                with self.assertRaisesRegex(audio.ImportFailure, "^invalid-previous-report$"):
+                    audio.previous_failure_outcomes(invalid, [source], {FIRST, SECOND})
+
     def test_deduplicates_downloads_preserves_positions_failures_and_limit(self):
         calls = []
 

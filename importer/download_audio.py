@@ -2,6 +2,7 @@
 
 import argparse
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+import datetime
 import hashlib
 import http.client
 import json
@@ -23,10 +24,70 @@ RELEASE = "2026.08.19"
 OFFICIAL_SHA256 = "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a"
 MAX_AUDIO_BYTES = 256 * 1024 * 1024
 UUID = re.compile(r"^[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}$")
+PREVIOUS_FAILURE_REASONS = frozenset({
+    "dns-resolution-failed", "network-timeout", "connection-reset", "connection-refused", "network-unreachable",
+    "remote-disconnected", "certificate-validation-failed", "no-playable-stream", "interactive-verification-required",
+    "protected-stream", "private-video", "sign-in-required", "unavailable-stream", "removed-video", "rate-limited",
+    "stream-access-denied", "download-failed", "process-timeout", "audio-verification-failed",
+    "missing-or-invalid-audio-file",
+})
 
 
 class ImportFailure(Exception):
     """Only fixed, non-sensitive reason codes leave process boundaries."""
+
+
+def previous_failure_outcomes(report, manifests, selected_ids):
+    """Reuse only recognized failures reconciled to current source identities.
+
+    Previous paths, track IDs, counts, imported outcomes and arbitrary strings
+    never enter new outcomes. Every new row still comes from its manifest.
+    """
+    if not isinstance(report, dict) or report.get("schema") != "musiccloud.audio-import.v1" or report.get("source") != "youtube-music":
+        raise ImportFailure("invalid-previous-report")
+    playlists = report.get("playlists")
+    if not isinstance(playlists, list) or len(playlists) > 10000:
+        raise ImportFailure("invalid-previous-report")
+    identities = {(manifest["playlistId"], entry["videoId"], entry["title"], tuple(entry["artists"]))
+                  for manifest in manifests for entry in manifest["entries"]
+                  if entry["videoId"] and entry["available"] is not False}
+    selected_ids = set(selected_ids)
+    imported_ids = set()
+    observations = {}
+    total_rows = 0
+    for playlist in playlists:
+        if not isinstance(playlist, dict) or not isinstance(playlist.get("playlistId"), str) or not isinstance(playlist.get("entries"), list):
+            raise ImportFailure("invalid-previous-report")
+        total_rows += len(playlist["entries"])
+        if total_rows > 200000:
+            raise ImportFailure("invalid-previous-report")
+        for position, row in enumerate(playlist["entries"], 1):
+            if (not isinstance(row, dict) or type(row.get("position")) is not int or row["position"] != position
+                or not isinstance(row.get("title"), str) or len(row["title"]) > 10000
+                or not isinstance(row.get("artists"), list) or len(row["artists"]) > 1000
+                or not all(isinstance(artist, str) and len(artist) <= 10000 for artist in row["artists"])
+                or row.get("status") not in {"imported", "failed", "unavailable", "pending", "deferred"}
+                or "videoId" not in row):
+                raise ImportFailure("invalid-previous-report")
+            identifier = row["videoId"]
+            if identifier is not None and (not isinstance(identifier, str) or not VIDEO_ID.fullmatch(identifier)):
+                raise ImportFailure("invalid-previous-report")
+            if identifier not in selected_ids:
+                continue
+            if row["status"] == "imported":
+                imported_ids.add(identifier)
+            identity = (playlist["playlistId"], identifier, row["title"], tuple(row["artists"]))
+            if identity in identities and row["status"] != "unavailable":
+                reason = row.get("reason")
+                reason = reason if isinstance(reason, str) and reason in PREVIOUS_FAILURE_REASONS else None
+                observations.setdefault(identifier, []).append((row["status"], reason))
+    outcomes = {}
+    for identifier, observed in observations.items():
+        reasons = {reason for status, reason in observed}
+        if (identifier not in imported_ids and len(reasons) == 1 and None not in reasons
+            and all(status == "failed" for status, _ in observed)):
+            outcomes[identifier] = {"status": "failed", "reason": next(iter(reasons)), "previousFailure": True}
+    return outcomes
 
 
 def file_hash(path):
@@ -325,7 +386,8 @@ class LocalMusicCloud:
 
 
 def import_manifests(manifests, directory, tools, api, limit=1, deadline=240,
-                     downloader=download, writer=atomic_json, max_consecutive_failures=5, workers=4):
+                     downloader=download, writer=atomic_json, max_consecutive_failures=5, workers=4,
+                     previous_report=None):
     for manifest in manifests:
         validate_manifest(manifest)
     selected = {}
@@ -334,11 +396,11 @@ def import_manifests(manifests, directory, tools, api, limit=1, deadline=240,
             identifier = entry["videoId"]
             if identifier and entry["available"] is not False and identifier not in selected and len(selected) < limit:
                 selected[identifier] = entry
-    outcomes = {}
+    outcomes = previous_failure_outcomes(previous_report, manifests, selected) if previous_report is not None else {}
     report = {"schema": "musiccloud.audio-import.v1", "source": "youtube-music", "limit": limit, "workers": workers,
               "sourceComplete": all(item["complete"] is True for item in manifests), "complete": False,
               "attemptedUnique": 0, "importedUnique": 0, "failedUnique": 0, "paused": False,
-              "pauseReason": None, "playlists": []}
+              "pauseReason": None, "skippedPreviousFailures": len(outcomes), "playlists": []}
     consecutive_failures = 0
 
     def snapshot():
@@ -373,7 +435,7 @@ def import_manifests(manifests, directory, tools, api, limit=1, deadline=240,
     snapshot()
     cancel_event = threading.Event()
     worker_tools = {**tools, "cancel_event": cancel_event}
-    remaining = iter(selected)
+    remaining = (identifier for identifier in selected if identifier not in outcomes)
     pending = {}
     pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="musiccloud-download")
 
@@ -446,6 +508,8 @@ def main(argv=None):
     parser.add_argument("--max-consecutive-failures", type=int, default=5,
                         help="Pause rather than make further requests after this many consecutive failed IDs.")
     parser.add_argument("--workers", type=int, default=4, help="Concurrent download workers; API/report writes stay serial.")
+    parser.add_argument("--skip-previous-failures", action="store_true",
+                        help="Validate/back up the current private report and skip its recognized source download failures.")
     args = parser.parse_args(argv)
     try:
         if not 1 <= args.port <= 65535 or not 1 <= args.limit <= 10000 or not 30 <= args.deadline <= 1800 or not 1 <= args.max_consecutive_failures <= 100 or not 1 <= args.workers <= 32:
@@ -469,9 +533,25 @@ def main(argv=None):
         if any(path.resolve() in {directory / "download-report.json", directory / "download-report.json.tmp"} for path in inputs):
             raise ImportFailure("manifest-output-collision")
         manifests = [validate_manifest(read_json(path)) for path in inputs]
+        previous_report = None
+        report_path = directory / "download-report.json"
+        if args.skip_previous_failures:
+            previous_report = read_json(report_path)
+            selected_ids = {}
+            for manifest in manifests:
+                for entry in manifest["entries"]:
+                    identifier = entry["videoId"]
+                    if identifier and entry["available"] is not False and identifier not in selected_ids and len(selected_ids) < args.limit:
+                        selected_ids[identifier] = True
+            previous_failure_outcomes(previous_report, manifests, selected_ids)
+            stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            backup = directory / ("download-report.before-skip-" + stamp + "-" + uuid.uuid4().hex[:8] + ".json")
+            with backup.open("xb") as destination:
+                destination.write(report_path.read_bytes())
         report = import_manifests(manifests, directory, tools, LocalMusicCloud(args.port), args.limit, args.deadline,
-                                  max_consecutive_failures=args.max_consecutive_failures, workers=args.workers)
-        print(json.dumps({key: report[key] for key in ["attemptedUnique", "importedUnique", "failedUnique", "complete", "paused", "pauseReason"]}))
+                                  max_consecutive_failures=args.max_consecutive_failures, workers=args.workers,
+                                  previous_report=previous_report)
+        print(json.dumps({key: report[key] for key in ["attemptedUnique", "importedUnique", "failedUnique", "complete", "paused", "pauseReason", "skippedPreviousFailures"]}))
         if report["paused"]:
             return 3
         return 0 if report["failedUnique"] == 0 else 2
