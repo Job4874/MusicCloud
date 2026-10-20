@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#111519"><meta name="description" content="Your private, local music library. Listen, organize and prepare music for USB transfer.">
+  <title>MusicCloud · Your music, kept close</title><link rel="icon" href="/icon.svg" type="image/svg+xml"><link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="MusicCloud home"><span class="brand-mark">m<span>c</span></span><span>MusicCloud<small>PERSONAL MUSIC</small></span></a>
+    <div class="nav-label">YOUR SPACE</div>
+    <nav id="navigation" aria-label="Main navigation">
+      <button data-view="library" class="nav-item active"><span data-icon="library"></span> Library <span class="nav-count" id="nav-count">0</span></button>
+      <button data-view="albums" class="nav-item"><span data-icon="disc"></span> Albums</button>
+      <button data-view="favorites" class="nav-item"><span data-icon="heart"></span> Favorites</button>
+      <button data-view="catalogs" class="nav-item" title="YouTube playlists" aria-label="YouTube playlists"><span data-icon="queue"></span> YouTube playlists <span class="nav-count" id="catalog-count">0</span></button>
+      <button data-view="transfer" class="nav-item"><span data-icon="usb"></span> USB transfer <span class="dot"></span></button>
+    </nav>
+    <div class="playlist-label"><span class="nav-label">PLAYLISTS</span><button class="icon-button" id="new-playlist" aria-label="Create playlist" data-icon="plus"></button></div>
+    <div id="playlist-nav"></div>
+    <div class="sidebar-bottom"><div class="local-pill"><i></i> Running on your computer</div><p>Just your files. Just your space.</p><button class="text-button" id="about-button">About & maintenance <span>↗</span></button></div>
+  </aside>
+  <main id="main">
+    <header class="toolbar"><div class="breadcrumb">Your space <span>/</span> <strong id="crumb">Library</strong></div><div class="toolbar-actions"><label class="search"><span data-icon="search"></span><input id="search" type="search" placeholder="Search your music" aria-label="Search your music"><kbd>/</kbd></label><button class="button primary small" id="add-top"><span data-icon="plus"></span> Add music</button><span class="avatar" title="Personal library">YOU</span></div></header>
+    <div id="content"></div>
+    <footer class="content-footer"><span><i></i> Private by design</span><span>Stored here. Played here. Yours to maintain.</span><span>MusicCloud 1.0</span></footer>
+  </main>
+</div>
+<footer class="player" aria-label="Music player">
+  <div class="playing-track"><div id="player-art" class="art mini-art"><span>♪</span></div><div><strong id="playing-title">Make room for your music</strong><span id="playing-artist">Choose a track to start listening</span></div><button class="icon-button" id="player-favorite" aria-label="Favorite current track" data-icon="heart" disabled></button></div>
+  <div class="player-center"><div class="transport"><button class="icon-button" id="shuffle" aria-label="Shuffle" aria-pressed="false" data-icon="shuffle"></button><button class="icon-button" id="previous" aria-label="Previous track" data-icon="previous"></button><button class="play-main" id="play-toggle" aria-label="Play" data-icon="play"></button><button class="icon-button" id="next" aria-label="Next track" data-icon="next"></button><button class="icon-button" id="repeat" aria-label="Repeat off" data-icon="repeat"></button></div><div class="timeline"><span id="elapsed">0:00</span><input id="seek" type="range" min="0" max="1000" value="0" aria-label="Seek playback"><span id="duration">0:00</span></div></div>
+  <div class="player-extra"><button class="icon-button" id="queue-button" aria-label="View play queue" data-icon="queue"></button><span data-icon="volume"></span><input type="range" min="0" max="1" step="0.01" value="0.8" id="volume" aria-label="Volume"></div>
+</footer>
+<input type="file" id="file-input" accept=".mp3,.m4a,.aac,.wav,.aiff,.aif,.flac,.ogg,.opus" multiple hidden>
+<input type="file" id="catalog-file-input" accept=".json,application/json" aria-label="Import playlist JSON report" hidden>
+<dialog id="dialog"><div class="dialog-heading"><h2 id="dialog-title"></h2><button class="icon-button" id="dialog-close" aria-label="Close dialog" data-icon="close"></button></div><div id="dialog-body"></div></dialog>
+<div id="toast" role="status" aria-live="polite"></div><div id="drop-zone" hidden><div><span data-icon="plus"></span><h2>Bring your music home.</h2><p>Drop audio files to add them to your local library.</p></div></div>
+<audio id="audio" preload="metadata"></audio><script type="module" src="/app.js"></script>
+</body></html>

@@ -1,0 +1,30 @@
+name: Build iPhone app
+
+# Manual only. No scheduled runs, paid services, signing secrets or music uploads.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: musiccloud-iphone
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check original model behavior
+        run: bash iphone/check-models.sh
+      - name: Compile native app and package unsigned IPA
+        run: bash iphone/build-unsigned.sh
+      - name: Keep private build output for one day
+        uses: actions/upload-artifact@v4
+        with:
+          name: MusicCloud-unsigned-ipa
+          path: iphone/build/MusicCloud-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 1

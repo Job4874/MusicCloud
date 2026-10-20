@@ -1,0 +1,12 @@
+{
+  "name": "musiccloud-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Your private, local music library. No packages or cloud services required.",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test tests/server.test.mjs tests/launcher.test.mjs"
+  }
+}

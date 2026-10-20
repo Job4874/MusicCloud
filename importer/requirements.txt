@@ -1,0 +1,2 @@
+# The adapter audits the private parser interface of this exact release.
+ytmusicapi==1.12.3

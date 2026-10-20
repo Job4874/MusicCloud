@@ -1,0 +1,17 @@
+desktop/data/
+iphone/build/
+iphone/*.xcuserstate
+iphone/**/xcuserdata/
+runtime/node.exe
+importer/.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+*auth*.json
+*token*.json
+*.p12
+*.mobileprovision
+*.ipa
+*.log
+playlist-exports/
