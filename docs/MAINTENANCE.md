@@ -6,9 +6,9 @@ You maintain the source code, library files, backups, and signing renewals. Ther
 
 - Start `START-MUSICCLOUD.cmd` or follow the project README. The manager runs `desktop/server.mjs` at `http://127.0.0.1:4783` on this computer.
 - Add music you are authorized to use, verify playback, and organize the library before exporting files to the phone.
-- In **USB transfer**, choose **Prepare USB folder**, then **Open transfer folder** to reach the audio copies for the phone.
+- In **USB transfer**, choose **Prepare USB folder**, then **Open transfer folder** to reach the audio copies, native playlist backup and detailed transfer report for the phone.
 - Copy new songs through Apple Devices > Files > MusicCloud using USB, then refresh the phone's library. Treat the phone and desktop as separate copies of your files.
-- Use the same Apple Account and app identity when renewing through AltServer or Xcode. The seven-day renewal requirement is described in `USB-AND-INSTALL.md`. Desktop and iPhone playlists remain separate.
+- Use the same Apple Account and app identity when renewing through AltServer or Xcode. The seven-day renewal requirement is described in `USB-AND-INSTALL.md`. After copying a new Windows playlist backup, apply it through the phone’s **Restore playlist backup** action. This replaces phone playlists/favorites, so export the phone’s current backup first if it should be preserved.
 
 ## Keep two kinds of backup
 
@@ -36,7 +36,7 @@ Changing the displayed app name does not require changing its bundle identifier.
 
 For a desktop problem, stop the manager, keep a copy of the damaged/current data for inspection, and restore the previous project and data together from a known-good backup. Restart with the same documented command and test a small selection of tracks before importing more files.
 
-For an iPhone app-code problem, build the previous known-good source and sign/install it using the same Apple Account and app identity. Confirm the phone's existing files before doing anything destructive. If local tracks are missing, reinstall a valid signed build if necessary, then copy the retained PC music files back over USB. Restore `MusicCloud-playlists.json` through the phone's **Restore playlist backup** action, reviewing its replace confirmation; matching relative audio paths restore playlist membership. The desktop audio export does not contain phone playlists. A whole-device Restore Backup affects the phone beyond MusicCloud; use Apple's documented restore procedure only when you intend that wider restore.
+For an iPhone app-code problem, build the previous known-good source and sign/install it using the same Apple Account and app identity. Confirm the phone's existing files before doing anything destructive. If local tracks are missing, reinstall a valid signed build if necessary, then copy the retained PC music files back over USB. Restore `MusicCloud-playlists.json` through the phone's **Restore playlist backup** action, reviewing its replace confirmation; matching relative audio paths restore playlist membership. The desktop export contains its own playlists, favorites and source-catalog matches; it does not retrieve later phone-only edits. Keep phone exports separately so restoration does not replace those edits unintentionally. A whole-device Restore Backup affects the phone beyond MusicCloud; use Apple's documented restore procedure only when you intend that wider restore.
 
 If a file becomes corrupt, preserve the original and try a known-good copy rather than renaming an unsupported format to another extension. Keep at least one backup disconnected while editing or cleaning the library.
 

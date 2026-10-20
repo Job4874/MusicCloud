@@ -227,6 +227,13 @@ export async function createCatalogStore({ dataDir, getTracks }) {
     return catalogDetail(catalog, await currentIndex());
   }
 
+  async function exportDetails() {
+    await queue;
+    const snapshot = state;
+    const index = await currentIndex();
+    return snapshot.catalogs.map(catalog => catalogDetail(catalog, index));
+  }
+
   function importManifest(value) {
     let manifest;
     try { manifest = cleanManifest(value); }
@@ -243,5 +250,5 @@ export async function createCatalogStore({ dataDir, getTracks }) {
     });
   }
 
-  return { list, detail, import: importManifest };
+  return { list, detail, exportDetails, import: importManifest };
 }

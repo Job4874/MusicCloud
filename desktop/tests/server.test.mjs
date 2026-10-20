@@ -208,6 +208,66 @@ test('export produces a deterministic USB folder without deleting or overwriting
   assert.match(next.files[0], new RegExp(track.id));
 });
 
+test('USB backup maps actual collision filenames to native favorites and ordered playlists, with honest source omissions', async t => {
+  const f = await fixture(t);
+  const { track: first } = await (await f.upload('.Artist - First.mp3', Buffer.from('ID3 first recording'))).json();
+  const { track: second } = await (await f.upload('Artist - Second.mp3', Buffer.from('ID3 second recording'))).json();
+  for (const [id, youtubeVideoIds] of [[first.id, ['aaaaaaaaaaa', 'ccccccccccc']], [second.id, ['bbbbbbbbbbb', 'ccccccccccc']]]) {
+    assert.equal((await f.request(`/api/tracks/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ youtubeVideoIds }) })).status, 200);
+  }
+  const initial = await (await f.request('/api/export', { method: 'POST' })).json();
+  assert.equal(initial.files[0].startsWith('.'), false, 'iPhone scanning must see a dot-prefixed artist');
+  await fs.writeFile(path.join(initial.path, initial.files[0]), 'owner-modified audio');
+  const row = (position, videoId) => ({ position, title: `Source row ${position}`, artists: ['Source artist'], videoId,
+    url: videoId ? `https://music.youtube.com/watch?v=${videoId}` : null, available: videoId !== null });
+  const manifest = { schema: 'musiccloud.playlist.v1', source: 'youtube-music', playlistId: 'PLsyntheticUSB',
+    title: 'Source playlist', reportedCount: 7, extractedCount: 6, complete: false, warnings: ['One advertised row was not returned.'],
+    entries: [row(1, 'bbbbbbbbbbb'), row(2, 'aaaaaaaaaaa'), row(3, 'bbbbbbbbbbb'), row(4, 'ddddddddddd'), row(5, null), row(6, 'ccccccccccc')] };
+  const source = await (await f.request('/api/catalogs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(manifest) })).json();
+  // Desktop UUIDs may differ only by case, and a desktop UUID may also reuse
+  // the catalog UUID. Swift UUID equality ignores case; all must stay distinct.
+  const mixedCaseID = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
+  await f.request('/api/state', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+    favorites: [first.id], playlists: [
+      { id: mixedCaseID, name: 'Desktop mix', trackIds: [first.id, second.id] },
+      { id: mixedCaseID.toUpperCase(), name: 'Different case', trackIds: [second.id] },
+      { id: source.id, name: 'Same as catalog', trackIds: [first.id] },
+    ] }) });
+  const exported = await (await f.request('/api/export', { method: 'POST' })).json();
+  const backupBytes = await fs.readFile(path.join(exported.path, exported.backupFile));
+  const backup = JSON.parse(backupBytes);
+  const report = JSON.parse(await fs.readFile(path.join(exported.path, exported.reportFile), 'utf8'));
+  assert.equal(backup.version, 1);
+  assert.ok(backupBytes.length <= 10 * 1024 * 1024);
+  assert.deepEqual(backup.favoriteIDs, [exported.files[0]]);
+  assert.notEqual(exported.files[0], initial.files[0]);
+  assert.deepEqual(backup.playlists.map(p => p.trackIDs), [[exported.files[0], exported.files[1]], [exported.files[1]], [exported.files[0]], [exported.files[1], exported.files[0]]]);
+  assert.equal(new Set(backup.playlists.map(p => p.id.toLowerCase())).size, 4);
+  for (const playlist of backup.playlists) {
+    assert.match(playlist.id, /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i);
+    assert.ok(playlist.name.trim());
+    assert.equal(new Set(playlist.trackIDs).size, playlist.trackIDs.length);
+    for (const filename of playlist.trackIDs) {
+      assert.equal(path.basename(filename), filename);
+      assert.equal(filename.startsWith('.'), false);
+      assert.ok((await fs.stat(path.join(exported.path, filename))).isFile());
+    }
+  }
+  assert.deepEqual(report.catalogs[0].entries.map(e => e.status), ['included', 'included', 'repeated', 'missing', 'unavailable', 'ambiguous']);
+  assert.deepEqual(report.catalogs[0].entries.map(e => e.position), [1, 2, 3, 4, 5, 6]);
+  assert.equal(report.catalogs[0].reportedCount, 7);
+  assert.equal(report.catalogs[0].sourceComplete, false);
+  assert.deepEqual([exported.playlistCount, exported.favoriteCount, exported.repeatedRows, exported.omittedRows], [4, 1, 1, 3]);
+  assert.equal(await fs.readFile(path.join(exported.path, initial.files[0]), 'utf8'), 'owner-modified audio');
+  const same = await (await f.request('/api/export', { method: 'POST' })).json();
+  assert.equal(same.backupFile, exported.backupFile);
+  assert.equal(same.reportFile, exported.reportFile);
+  await fs.writeFile(path.join(exported.path, exported.backupFile), 'owner-modified backup');
+  const next = await (await f.request('/api/export', { method: 'POST' })).json();
+  assert.notEqual(next.backupFile, exported.backupFile);
+  assert.equal(await fs.readFile(path.join(exported.path, exported.backupFile), 'utf8'), 'owner-modified backup');
+});
+
 test('deleting a track cleans playlist references, favorites and private audio', async t => {
   const f = await fixture(t);
   const { track } = await (await f.upload()).json();

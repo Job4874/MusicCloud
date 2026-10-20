@@ -143,7 +143,10 @@ function validateStoredState(value) {
 
 function exportName(track) {
   const safe = value => value.normalize('NFKC').replace(/[<>:"/\\|?*\u0000-\u001f\u007f]/g, '_').replace(/[. ]+$/g, '').slice(0, 65).trim() || 'Untitled';
-  return `${safe(track.artist || 'Unknown artist')} - ${safe(track.title)} [${track.id}]${path.extname(track.fileName).toLowerCase()}`;
+  const name = `${safe(track.artist || 'Unknown artist')} - ${safe(track.title)} [${track.id}]${path.extname(track.fileName).toLowerCase()}`;
+  // iOS scanning excludes hidden files. A leading dot in an artist must not
+  // silently hide an otherwise valid exported recording.
+  return name.startsWith('.') ? `_${name}` : name;
 }
 
 function soundcheckWav() {
@@ -250,10 +253,31 @@ export async function createServer(options = {}) {
     for await (const chunk of createReadStream(target)) hash.update(chunk);
     return hash.digest('hex');
   }
+  async function writeExportJSON(base, value, maximum = Infinity) {
+    const contents = Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
+    if (contents.length > maximum) fail(413, 'The iPhone playlist backup would exceed 10 MB. Reduce the playlists before exporting.');
+    const expected = createHash('sha256').update(contents).digest('hex');
+    for (let number = 1; ; number++) {
+      const fileName = number === 1 ? base : `${path.basename(base, '.json')} (${number}).json`;
+      const target = path.join(exportPath, fileName);
+      let handle;
+      try {
+        handle = await fs.open(target, 'wx');
+        await handle.writeFile(contents);
+        await handle.sync();
+        return fileName;
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        const stat = await fs.lstat(target);
+        if (stat.isFile() && !stat.isSymbolicLink() && stat.size === contents.length && await fileHash(target) === expected) return fileName;
+      } finally { await handle?.close(); }
+    }
+  }
   async function exportLibrary() {
     return serialize(async () => {
       await ensureExport();
       const files = [];
+      const names = new Map();
       for (const track of state.tracks) {
         const { target } = await checkedAudio(track);
         const base = exportName(track);
@@ -269,8 +293,56 @@ export async function createServer(options = {}) {
           }
         }
         files.push(fileName);
+        names.set(track.id, fileName);
       }
-      return { path: exportPath, files, count: files.length };
+      const backup = { version: 1, favoriteIDs: state.favorites.map(id => names.get(id)).filter(Boolean), playlists: [] };
+      const report = { schema: 'musiccloud.usb-export.v1', audioFiles: files,
+        desktopPlaylists: [], catalogs: [], playlistRows: 0, repeatedRows: 0, omittedRows: 0 };
+      const playlistIDs = new Set();
+      function playlistID(id) {
+        // Swift decodes UUIDs case-insensitively; reserve canonical strings so
+        // differently cased desktop/catalog IDs cannot invalidate the backup.
+        const canonical = id.toLowerCase();
+        let candidate = canonical;
+        for (let salt = 0; playlistIDs.has(candidate); salt++) {
+          const hex = createHash('sha256').update(`MusicCloud USB playlist:${canonical}:${salt}`).digest('hex');
+          candidate = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+        }
+        playlistIDs.add(candidate);
+        return candidate;
+      }
+      for (const playlist of state.playlists) {
+        const trackIDs = playlist.trackIds.map(id => names.get(id)).filter(Boolean);
+        backup.playlists.push({ id: playlistID(playlist.id), name: playlist.name, trackIDs });
+        report.desktopPlaylists.push({ id: playlist.id, name: playlist.name, exportedTracks: trackIDs.length });
+      }
+      for (const catalog of await catalogs.exportDetails()) {
+        const nativeID = playlistID(catalog.id);
+        const seen = new Set();
+        const trackIDs = [];
+        const entries = catalog.entries.map(entry => {
+          const fileName = entry.matchStatus === 'matched' ? names.get(entry.matchedTrackId) : null;
+          let status = entry.matchStatus;
+          if (fileName) {
+            status = seen.has(fileName) ? 'repeated' : 'included';
+            if (status === 'included') { seen.add(fileName); trackIDs.push(fileName); }
+          } else if (status === 'matched') status = 'missing';
+          report.playlistRows++;
+          if (status === 'repeated') report.repeatedRows++;
+          else if (status !== 'included') report.omittedRows++;
+          return { position: entry.position, title: entry.title, artists: entry.artists,
+            videoId: entry.videoId, available: entry.available, status, fileName: fileName || null };
+        });
+        backup.playlists.push({ id: nativeID, name: catalog.title.trim() || 'Imported playlist', trackIDs });
+        report.catalogs.push({ playlistId: catalog.playlistId, nativePlaylistId: nativeID, title: catalog.title,
+          reportedCount: catalog.reportedCount, extractedCount: catalog.extractedCount,
+          sourceComplete: catalog.complete, warnings: catalog.warnings, exportedTracks: trackIDs.length, entries });
+      }
+      const backupFile = await writeExportJSON('MusicCloud-playlists.json', backup, 10 * 1024 * 1024);
+      const reportFile = await writeExportJSON('MusicCloud-transfer-report.json', { ...report, backupFile });
+      return { path: exportPath, files, count: files.length, backupFile, reportFile,
+        playlistCount: backup.playlists.length, favoriteCount: backup.favoriteIDs.length,
+        catalogRows: report.playlistRows, repeatedRows: report.repeatedRows, omittedRows: report.omittedRows };
     });
   }
 
