@@ -71,7 +71,7 @@ struct NowPlayingView: View {
                         Spacer()
                         VStack(spacing: 4) {
                             Text("NOW PLAYING").font(.system(size: 10, weight: .bold)).tracking(2.4)
-                            Text("Your library").font(.caption).foregroundStyle(.white.opacity(0.62))
+                            Text(playback.queueTitle).font(.caption).foregroundStyle(.white.opacity(0.62)).lineLimit(1)
                         }
                         Spacer()
                         Button { showQueue = true } label: {

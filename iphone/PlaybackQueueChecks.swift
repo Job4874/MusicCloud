@@ -75,6 +75,41 @@ enum PlaybackQueueChecks {
         require(upgraded.currentIndex == 2 && upgraded.queue[2].token == upgraded.original[2].token
             && upgraded.queue[1].token == upgraded.original[0].token,
             "Legacy restoration reused the first matching path token for multiple occurrences")
+        let legacyContext = try legacy.validatedContext()
+        let tokenCheckpointContext = try valid.validatedContext()
+        require(legacyContext == PlaybackQueueContext(name: "Your library", playlistID: nil)
+            && tokenCheckpointContext == legacyContext,
+            "A v1/v2 checkpoint invented a playlist origin instead of using the library fallback")
+
+        let playlistID = UUID()
+        let origin = PlaybackQueueContext.starting(contextName: "  Night drive  ", playlistID: playlistID)
+        require(origin.name == "Night drive" && origin.playlistID == playlistID,
+            "Starting a queue did not retain its named playlist origin")
+        let originCheckpoint = PlaybackCheckpoint(version: 3, queueIDs: upgraded.queue.map(\.trackID),
+            originalIDs: upgraded.original.map(\.trackID), currentIndex: upgraded.currentIndex!,
+            position: 37.5, shuffled: true, repeatMode: "all", queueTokens: upgraded.queue.map(\.token),
+            originalTokens: upgraded.original.map(\.token), contextName: origin.name, playlistID: playlistID)
+        let originData = try JSONEncoder().encode(originCheckpoint)
+        let afterRestart = try JSONDecoder().decode(PlaybackCheckpoint.self, from: originData)
+        let restoredOrigin = try afterRestart.validatedContext()
+        let restoredOccurrences = try afterRestart.validatedQueueState()
+        require(restoredOrigin == origin && restoredOccurrences == upgraded && afterRestart.position == 37.5,
+            "A v3 restart lost playlist identity, duplicate occurrence identity or position")
+        let boundedOrigin = PlaybackQueueContext.starting(contextName: String(repeating: "é", count: 501), playlistID: nil)
+        require(boundedOrigin.name.count == 500, "A new queue accepted an unbounded context title")
+        var oversizedOrigin = originCheckpoint
+        oversizedOrigin.contextName = String(repeating: "x", count: 501)
+        rejects("A persisted oversized context title was accepted") { _ = try oversizedOrigin.validatedQueueState() }
+        var blankOrigin = originCheckpoint
+        blankOrigin.contextName = " \n "
+        rejects("A persisted blank context title was accepted") { _ = try blankOrigin.validatedQueueState() }
+        var unnamedPlaylist = originCheckpoint
+        unnamedPlaylist.contextName = nil
+        rejects("A playlist UUID without a context name was accepted") { _ = try unnamedPlaylist.validatedQueueState() }
+        var invalidUUIDObject = try JSONSerialization.jsonObject(with: originData) as! [String: Any]
+        invalidUUIDObject["playlistID"] = "not-a-playlist-uuid"
+        let invalidUUIDData = try JSONSerialization.data(withJSONObject: invalidUUIDObject)
+        rejects("A malformed persisted playlist UUID was accepted") { _ = try JSONDecoder().decode(PlaybackCheckpoint.self, from: invalidUUIDData) }
         let damaged = PlaybackCheckpoint(version: 1, queueIDs: [a, a], originalIDs: [a, b],
             currentIndex: 1, position: 0, shuffled: false, repeatMode: "off", queueTokens: nil, originalTokens: nil)
         rejects("A malformed legacy multiset was accepted") { _ = try damaged.validatedQueueState() }
@@ -89,6 +124,6 @@ enum PlaybackQueueChecks {
         require(missing.queue.map(\.trackID) == [a, c] && missing.currentToken == stillPlaying,
             "Reconciliation retained all missing duplicates instead of just the playing occurrence")
         try missing.validate()
-        print("Playback queue checks passed: repeated files survive selection, shuffle, rescan, removal, Play next and checkpoint recovery; malformed token/path mappings rejected.")
+        print("Playback queue checks passed: repeated files survive selection, shuffle, rescan, removal, Play next and checkpoint recovery; playlist context survives v3 restart, v1/v2 context falls back safely, and malformed token/path/context data is rejected.")
     }
 }

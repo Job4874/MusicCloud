@@ -104,6 +104,18 @@ struct PlaybackQueueState: Equatable {
     }
 }
 
+struct PlaybackQueueContext: Equatable {
+    static let libraryTitle = "Your library"
+    let name: String
+    let playlistID: UUID?
+
+    static func starting(contextName: String?, playlistID: UUID?) -> Self {
+        let trimmed = contextName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let bounded = trimmed.isEmpty ? libraryTitle : String(trimmed.prefix(500))
+        return Self(name: bounded, playlistID: playlistID)
+    }
+}
+
 struct PlaybackCheckpoint: Codable {
     static let maximumBytes = 16 * 1024 * 1024
     static let maximumOccurrences = 50_000
@@ -116,18 +128,37 @@ struct PlaybackCheckpoint: Codable {
     let repeatMode: String
     let queueTokens: [UUID]?
     let originalTokens: [UUID]?
+    // Optional defaults preserve source compatibility with v1/v2 fixtures.
+    var contextName: String? = nil
+    var playlistID: UUID? = nil
+
+    func validatedContext() throws -> PlaybackQueueContext {
+        guard (1...3).contains(version) else { throw PlaybackQueueError.invalidCheckpoint }
+        if version < 3 {
+            guard contextName == nil, playlistID == nil else { throw PlaybackQueueError.invalidCheckpoint }
+            return PlaybackQueueContext(name: PlaybackQueueContext.libraryTitle, playlistID: nil)
+        }
+        if let contextName {
+            guard !contextName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                contextName.count <= 500 else { throw PlaybackQueueError.invalidCheckpoint }
+        } else if playlistID != nil {
+            throw PlaybackQueueError.invalidCheckpoint
+        }
+        return PlaybackQueueContext(name: contextName ?? PlaybackQueueContext.libraryTitle, playlistID: playlistID)
+    }
 
     func validatedQueueState() throws -> PlaybackQueueState {
-        guard version == 1 || version == 2, !queueIDs.isEmpty,
+        guard (1...3).contains(version), !queueIDs.isEmpty,
             queueIDs.count <= Self.maximumOccurrences, originalIDs.count <= Self.maximumOccurrences,
             queueIDs.indices.contains(currentIndex), queueIDs.count == originalIDs.count,
             position.isFinite, position >= 0, ["off", "all", "one"].contains(repeatMode),
             queueIDs.allSatisfy(Self.isRelativePath), originalIDs.allSatisfy(Self.isRelativePath) else {
             throw PlaybackQueueError.invalidCheckpoint
         }
+        _ = try validatedContext()
         var state = PlaybackQueueState()
         state.currentIndex = currentIndex
-        if version == 2 {
+        if version >= 2 {
             guard let queueTokens, let originalTokens,
                 queueTokens.count == queueIDs.count, originalTokens.count == originalIDs.count else {
                 throw PlaybackQueueError.invalidCheckpoint

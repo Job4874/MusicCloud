@@ -6,17 +6,15 @@ struct PlaylistsView: View {
     @State private var showCreate = false
     @State private var playlistName = ""
     @State private var deleting: Playlist?
+    @State private var query = ""
+
+    private var visiblePlaylists: [Playlist] {
+        let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? library.state.playlists : library.state.playlists.filter { $0.name.localizedStandardContains(text) }
+    }
 
     var body: some View {
         List {
-            Section {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("A place for every mood.")
-                        .font(.system(size: 29, weight: .bold, design: .rounded))
-                    Text("Make it yours. Your playlists stay on this iPhone.")
-                        .font(.subheadline).foregroundStyle(.secondary)
-                }.padding(.vertical, 12)
-            }.listRowBackground(Theme.background)
             if library.state.playlists.isEmpty {
                 Section {
                     VStack(spacing: 16) {
@@ -28,8 +26,9 @@ struct PlaylistsView: View {
                     }.frame(maxWidth: .infinity).padding(.vertical, 30)
                 }.listRowBackground(Theme.surface)
             } else {
-                Section("\(library.state.playlists.count) playlists") {
-                    ForEach(library.state.playlists) { playlist in
+                Section("\(visiblePlaylists.count) playlists") {
+                    if visiblePlaylists.isEmpty { Text("No playlists match your search.").foregroundStyle(.secondary) }
+                    ForEach(visiblePlaylists) { playlist in
                         NavigationLink {
                             PlaylistDetailView(playlistID: playlist.id)
                         } label: {
@@ -50,6 +49,7 @@ struct PlaylistsView: View {
         }
         .scrollContentBackground(.hidden).background(Theme.background)
         .navigationTitle("Playlists")
+        .searchable(text: $query, prompt: "Find a playlist")
         .toolbar { Button { playlistName = ""; showCreate = true } label: { Image(systemName: "plus") }.accessibilityLabel("Create playlist") }
         .alert("New playlist", isPresented: $showCreate) {
             TextField("Playlist name", text: $playlistName)
@@ -119,19 +119,26 @@ struct PlaylistDetailView: View {
         List {
             if let playlist {
                 Section {
-                    VStack(spacing: 14) {
-                        ArtworkView(data: library.artwork(for: playlist), size: 160, symbol: "music.note.list")
-                        Text("\(tracks.count) available · \(library.playlistEntryCount(playlist)) total · \(tracks.reduce(0) { $0 + $1.duration }.musicTime)")
-                            .font(.subheadline).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack(spacing: 16) {
+                            ArtworkView(data: library.artwork(for: playlist), size: 88, symbol: "music.note.list")
+                            VStack(alignment: .leading, spacing: 7) {
+                                Text(playlist.name).font(.title3.bold()).lineLimit(2)
+                                Text("\(tracks.count) available · \(library.playlistEntryCount(playlist)) total")
+                                    .font(.subheadline).foregroundStyle(.secondary)
+                                Text("\(tracks.reduce(0) { $0 + $1.duration }.musicTime) of music")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
                         HStack {
-                            Button { playback.playAll(tracks) } label: {
+                            Button { playback.playAll(tracks, contextName: playlist.name, playlistID: playlist.id) } label: {
                                 Label("Play", systemImage: "play.fill").frame(maxWidth: .infinity)
                             }.buttonStyle(.borderedProminent).foregroundStyle(Theme.background)
-                            Button { playback.playAll(tracks, shuffled: true) } label: {
+                            Button { playback.playAll(tracks, shuffled: true, contextName: playlist.name, playlistID: playlist.id) } label: {
                                 Label("Shuffle", systemImage: "shuffle").frame(maxWidth: .infinity)
                             }.buttonStyle(.bordered)
                         }.disabled(tracks.isEmpty)
-                    }.frame(maxWidth: .infinity).padding(.vertical)
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4)
                 }.listRowBackground(Theme.background)
                 Section {
                     if rows.isEmpty {
@@ -142,7 +149,7 @@ struct PlaylistDetailView: View {
                     }
                     ForEach(rows) { row in
                         if let index = row.playbackIndex, tracks.indices.contains(index) {
-                            TrackRow(track: tracks[index], context: tracks, playbackIndex: index)
+                            TrackRow(track: tracks[index], context: tracks, playbackIndex: index, contextName: playlist.name, playlistID: playlist.id)
                                 .listRowBackground(Theme.surface)
                         } else {
                             HStack(spacing: 12) {
@@ -239,5 +246,4 @@ private struct AddSongsView: View {
         }.preferredColorScheme(.dark).tint(Theme.accent)
     }
 }
-
 

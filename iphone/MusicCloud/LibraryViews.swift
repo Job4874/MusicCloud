@@ -7,6 +7,9 @@ struct RootView: View {
     @EnvironmentObject private var playback: PlaybackController
     @Environment(\.scenePhase) private var scenePhase
     @State private var showNowPlaying = false
+    @State private var selectedTab = RootTab.library
+
+    private enum RootTab: Hashable { case library, playlists, transfer }
 
     var body: some View {
         Group {
@@ -18,22 +21,7 @@ struct RootView: View {
                     .multilineTextAlignment(.center)
             }.padding(24)
         } else {
-        TabView {
-            NavigationStack { LibraryView() }
-                .tabItem { Label("Library", systemImage: "square.stack") }
-            NavigationStack { PlaylistsView() }
-                .tabItem { Label("Playlists", systemImage: "music.note.list") }
-            NavigationStack { TransferView() }
-                .tabItem { Label("Transfer", systemImage: "cable.connector") }
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if playback.currentTrack != nil {
-                MiniPlayer { showNowPlaying = true }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(Theme.background)
-            }
-        }
+        tabsWithPlayer
         .sheet(isPresented: $showNowPlaying) { NowPlayingView() }
         .alert("MusicCloud", isPresented: Binding(get: { library.message != nil },
             set: { if !$0 { library.message = nil } })) {
@@ -55,6 +43,55 @@ struct RootView: View {
             }
         }
         }
+        }
+    }
+
+    @ViewBuilder private var tabsWithPlayer: some View {
+        if #available(iOS 26.1, *) {
+            tabs(usesPlayerInset: false)
+                .tabViewBottomAccessory(isEnabled: playback.currentTrack != nil) { miniPlayer }
+                .tabBarMinimizeBehavior(.never)
+        } else if #available(iOS 26.0, *) {
+            tabs(usesPlayerInset: false)
+                .tabViewBottomAccessory { miniPlayer }
+                .tabBarMinimizeBehavior(.never)
+        } else {
+            tabs(usesPlayerInset: true)
+        }
+    }
+
+    private func tabs(usesPlayerInset: Bool) -> some View {
+        TabView(selection: $selectedTab) {
+            NavigationStack { tabScreen(LibraryView(), usesPlayerInset: usesPlayerInset) }
+                .tabItem { Label("Library", systemImage: "square.stack").accessibilityIdentifier("tab.library") }
+                .tag(RootTab.library)
+            NavigationStack { tabScreen(PlaylistsView(), usesPlayerInset: usesPlayerInset) }
+                .tabItem { Label("Playlists", systemImage: "music.note.list").accessibilityIdentifier("tab.playlists") }
+                .tag(RootTab.playlists)
+            NavigationStack { tabScreen(TransferView(), usesPlayerInset: usesPlayerInset) }
+                .tabItem { Label("Transfer", systemImage: "cable.connector").accessibilityIdentifier("tab.transfer") }
+                .tag(RootTab.transfer)
+        }
+        .toolbar(.visible, for: .tabBar)
+    }
+
+    @ViewBuilder private func tabScreen<Content: View>(_ content: Content, usesPlayerInset: Bool) -> some View {
+        if usesPlayerInset {
+            // Older systems reserve player space inside the navigation content,
+            // leaving the TabView itself and its three tab items unobstructed.
+            content
+                .toolbar(.visible, for: .tabBar)
+                .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer.background(Theme.background) }
+        } else {
+            content.toolbar(.visible, for: .tabBar)
+        }
+    }
+
+    @ViewBuilder private var miniPlayer: some View {
+        if playback.currentTrack != nil {
+            MiniPlayer { showNowPlaying = true }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
         }
     }
 }
@@ -80,28 +117,26 @@ struct LibraryView: View {
     var body: some View {
         List {
             Section {
-                VStack(alignment: .leading, spacing: 14) {
-                    HStack(spacing: 6) {
-                        Circle().fill(Theme.accent).frame(width: 6, height: 6)
-                        Text("YOUR MUSIC. EVERYWHERE YOU GO.")
-                            .font(.system(size: 10, weight: .bold, design: .rounded)).tracking(1.5)
-                            .foregroundStyle(Theme.subdued)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("Your library").font(.title2.bold())
+                        Spacer(minLength: 8)
+                        Text("\(library.tracks.count) songs").font(.subheadline).foregroundStyle(.secondary)
                     }
-                    Text("Keep it close.").font(.system(size: 34, weight: .bold, design: .rounded))
-                    Text("\(library.tracks.count) songs · \(library.totalSize) · Stored on this iPhone")
+                    Text("\(library.totalSize) stored on this iPhone")
                         .font(.caption).foregroundStyle(.secondary)
                     HStack(spacing: 10) {
-                        Button { playback.playAll(visibleTracks) } label: {
-                            Label("Play all", systemImage: "play.fill").frame(maxWidth: .infinity)
+                        Button { playback.playAll(visibleTracks, contextName: filter == .favorites ? "Favorites" : "Your library") } label: {
+                            Label("Play", systemImage: "play.fill").frame(maxWidth: .infinity)
                         }.buttonStyle(.borderedProminent).foregroundStyle(Theme.background)
-                        Button { playback.playAll(visibleTracks, shuffled: true) } label: {
+                        Button { playback.playAll(visibleTracks, shuffled: true, contextName: filter == .favorites ? "Favorites" : "Your library") } label: {
                             Label("Shuffle", systemImage: "shuffle").frame(maxWidth: .infinity)
                         }.buttonStyle(.bordered)
                     }.disabled(visibleTracks.isEmpty)
                 }
-                .padding(.vertical, 10)
+                .padding(.vertical, 4)
                 .listRowBackground(Theme.background)
-                .listRowInsets(EdgeInsets(top: 8, leading: 4, bottom: 12, trailing: 4))
+                .listRowInsets(EdgeInsets(top: 4, leading: 4, bottom: 8, trailing: 4))
             }
             Section {
                 Picker("Library view", selection: $filter) {
@@ -125,7 +160,7 @@ struct LibraryView: View {
                     groupRows
                 } else {
                     ForEach(visibleTracks) { track in
-                        TrackRow(track: track, context: visibleTracks)
+                        TrackRow(track: track, context: visibleTracks, contextName: filter == .favorites ? "Favorites" : "Your library")
                             .listRowBackground(Theme.surface)
                     }
                 }
@@ -195,17 +230,17 @@ struct TrackCollectionView: View {
                     ArtworkView(data: currentTracks.first?.artwork, size: 180)
                     if let subtitle { Text(subtitle).foregroundStyle(.secondary) }
                     HStack {
-                        Button { playback.playAll(currentTracks) } label: {
+                        Button { playback.playAll(currentTracks, contextName: title) } label: {
                             Label("Play", systemImage: "play.fill").frame(maxWidth: .infinity)
                         }.buttonStyle(.borderedProminent).foregroundStyle(Theme.background)
-                        Button { playback.playAll(currentTracks, shuffled: true) } label: {
+                        Button { playback.playAll(currentTracks, shuffled: true, contextName: title) } label: {
                             Label("Shuffle", systemImage: "shuffle").frame(maxWidth: .infinity)
                         }.buttonStyle(.bordered)
                     }.disabled(currentTracks.isEmpty)
                 }.frame(maxWidth: .infinity).padding(.vertical)
             }.listRowBackground(Theme.background)
             Section("\(currentTracks.count) songs") {
-                ForEach(currentTracks) { TrackRow(track: $0, context: currentTracks).listRowBackground(Theme.surface) }
+                ForEach(currentTracks) { TrackRow(track: $0, context: currentTracks, contextName: title).listRowBackground(Theme.surface) }
             }
         }
         .scrollContentBackground(.hidden).background(Theme.background)
@@ -220,14 +255,16 @@ struct TrackRow: View {
     let track: Track
     let context: [Track]
     var playbackIndex: Int? = nil
+    var contextName: String? = nil
+    var playlistID: UUID? = nil
     @State private var confirmDelete = false
     @State private var showEdit = false
 
     var body: some View {
         HStack(spacing: 12) {
             Button {
-                if let playbackIndex { playback.play(at: playbackIndex, from: context) }
-                else { playback.play(track, from: context) }
+                if let playbackIndex { playback.play(at: playbackIndex, from: context, contextName: contextName, playlistID: playlistID) }
+                else { playback.play(track, from: context, contextName: contextName, playlistID: playlistID) }
             } label: {
                 HStack(spacing: 12) {
                     ArtworkView(data: track.artwork, size: 46)
