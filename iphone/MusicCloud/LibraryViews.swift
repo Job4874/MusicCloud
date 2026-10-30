@@ -36,7 +36,15 @@ struct RootView: View {
         } message: { Text(playback.errorMessage ?? "") }
         .task { library.rescan() }
         .onChange(of: scenePhase) { phase in if phase == .active { library.rescan() } }
-        .onChange(of: library.tracks) { tracks in playback.reconcile(with: tracks) }
+        .onChange(of: library.tracks) { tracks in
+            if library.lastScanSucceeded { playback.reconcile(with: tracks) }
+        }
+        .onChange(of: library.lastScan) { _ in
+            if library.lastScanSucceeded {
+                playback.restoreIfNeeded(with: library.tracks)
+                playback.reconcile(with: library.tracks)
+            }
+        }
     }
 }
 

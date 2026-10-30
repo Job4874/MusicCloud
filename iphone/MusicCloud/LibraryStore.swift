@@ -11,6 +11,7 @@ final class LibraryStore: ObservableObject {
     @Published private(set) var isImporting = false
     @Published var message: String?
     @Published private(set) var lastScan: Date?
+    @Published private(set) var lastScanSucceeded = false
 
     nonisolated static let extensions: Set<String> = ["mp3", "m4a", "aac", "wav", "aif", "aiff", "flac", "caf"]
     let documentsURL: URL
@@ -70,6 +71,7 @@ final class LibraryStore: ObservableObject {
         let generation = UUID()
         scanGeneration = generation
         isScanning = true
+        lastScanSucceeded = false
         let root = documentsURL
         let cache = Dictionary(uniqueKeysWithValues: scannedTracks.map { ($0.id, $0) })
         scanTask = Task {
@@ -80,6 +82,7 @@ final class LibraryStore: ObservableObject {
                 await worker.value
             }, onCancel: { worker.cancel() })
             guard !Task.isCancelled, scanGeneration == generation else { return }
+            lastScanSucceeded = result.error == nil
             scannedTracks = result.tracks
             applyMetadataOverrides()
             isScanning = false
@@ -138,7 +141,9 @@ final class LibraryStore: ObservableObject {
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            try encoder.encode(state).write(to: stateURL, options: .atomic)
+            let data = try encoder.encode(state)
+            guard data.count <= 10 * 1024 * 1024 else { throw StoreError.libraryTooLarge }
+            try data.write(to: stateURL, options: .atomic)
             return true
         } catch {
             message = "Could not save song details: \(error.localizedDescription)"
@@ -282,7 +287,9 @@ final class LibraryStore: ObservableObject {
     func makeBackup() throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        return try encoder.encode(state)
+        let data = try encoder.encode(state)
+        guard data.count <= 10 * 1024 * 1024 else { throw StoreError.libraryTooLarge }
+        return data
     }
 
     nonisolated static func readBackup(from source: URL) async throws -> Data {
@@ -347,7 +354,9 @@ final class LibraryStore: ObservableObject {
         // if the device has no free space or cannot write the replacement.
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(decoded).write(to: stateURL, options: .atomic)
+        let mergedData = try encoder.encode(decoded)
+        guard mergedData.count <= 10 * 1024 * 1024 else { throw StoreError.libraryTooLarge }
+        try mergedData.write(to: stateURL, options: .atomic)
         state = decoded
         applyMetadataOverrides()
         canSave = true
@@ -392,8 +401,18 @@ final class LibraryStore: ObservableObject {
         var result: [Track] = []
         for case let url as URL in enumerator {
             if Task.isCancelled { break }
-            guard let values = try? url.resourceValues(forKeys: Set(keys)) else { continue }
+            let values: URLResourceValues
+            do {
+                values = try url.resourceValues(forKeys: Set(keys))
+            } catch {
+                scanError = "Some files could not be read. \(error.localizedDescription)"
+                continue
+            }
             if values.isSymbolicLink == true { enumerator.skipDescendants(); continue }
+            if values.isRegularFile == nil && extensions.contains(url.pathExtension.lowercased()) {
+                scanError = "Some music files could not be checked. Rescan when they are available."
+                continue
+            }
             guard values.isRegularFile == true, extensions.contains(url.pathExtension.lowercased()) else { continue }
             let prefix = root.standardizedFileURL.path + "/"
             guard url.standardizedFileURL.path.hasPrefix(prefix) else { continue }
@@ -447,12 +466,13 @@ final class LibraryStore: ObservableObject {
 }
 
 private enum StoreError: LocalizedError {
-    case notRegularFile, unsupportedVersion, invalidBackup, cannotPreserveEdits
+    case notRegularFile, unsupportedVersion, invalidBackup, cannotPreserveEdits, libraryTooLarge
     var errorDescription: String? {
         switch self {
         case .notRegularFile: return "The selected item is not a regular audio file."
         case .unsupportedVersion: return "This library state was created by a different app version."
         case .invalidBackup: return "This is not a valid MusicCloud playlist backup, or it exceeds 10 MB."
+        case .libraryTooLarge: return "The library backup would exceed 10 MB. No replacement was saved."
         case .cannotPreserveEdits: return "The existing library state could not be read, so song edits cannot be preserved from this older backup. No data was changed. Preserve the existing library data before recovery."
         }
     }

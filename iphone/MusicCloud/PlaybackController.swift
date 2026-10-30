@@ -11,7 +11,9 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var duration: TimeInterval = 0
     @Published private(set) var isShuffled = false
-    @Published var repeatMode: RepeatMode = .off
+    @Published var repeatMode: RepeatMode = .off {
+        didSet { saveCheckpoint() }
+    }
     @Published var errorMessage: String?
 
     private var player: AVAudioPlayer?
@@ -21,6 +23,11 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
     private var resumeAfterInterruption = false
     private var remoteTargets: [(MPRemoteCommand, Any)] = []
     private var notificationObservers: [NSObjectProtocol] = []
+    private let checkpointURL: URL
+    private var pendingCheckpoint: PlaybackCheckpoint?
+    private var restoringCheckpoint = false
+    private var lastCheckpointTime = Date.distantPast
+    private var interruptionActive = false
 
     var currentTrack: Track? {
         guard let currentIndex, queue.indices.contains(currentIndex) else { return nil }
@@ -29,7 +36,11 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
 
     init(documentsURL: URL) {
         self.documentsURL = documentsURL
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("MusicCloud", isDirectory: true)
+        checkpointURL = support.appendingPathComponent("playback-state.json")
         super.init()
+        pendingCheckpoint = Self.readCheckpoint(from: checkpointURL)
         configureRemoteCommands()
         notificationObservers.append(NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
@@ -43,6 +54,10 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
             forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor [weak self] in self?.mediaServicesReset() }
             })
+        notificationObservers.append(NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.saveCheckpoint() }
+            })
         timer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.tick() }
         }
@@ -50,6 +65,7 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
 
     func play(_ track: Track, from tracks: [Track]) {
         guard !tracks.isEmpty else { return }
+        pendingCheckpoint = nil
         originalOrder = tracks
         if isShuffled {
             queue = [track] + tracks.filter { $0.id != track.id }.shuffled()
@@ -71,13 +87,18 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
 
     func resume() {
         guard currentTrack != nil else { return }
-        if player == nil { loadCurrentTrack(autoplay: true); return }
+        if player == nil {
+            let position = duration > 0 && elapsed >= duration ? 0 : elapsed
+            loadCurrentTrack(autoplay: true, position: position)
+            return
+        }
         do {
             try activateSession()
             if elapsed >= duration, duration > 0 { player?.currentTime = 0 }
             guard player?.play() == true else { throw PlaybackError.couldNotPlay }
             isPlaying = true
             refreshNowPlaying()
+            saveCheckpoint()
         } catch { report(error) }
     }
 
@@ -91,9 +112,12 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
         isPlaying = false
         elapsed = player?.currentTime ?? elapsed
         refreshNowPlaying()
+        saveCheckpoint()
     }
 
     func stop() {
+        pendingCheckpoint = nil
+        resumeAfterInterruption = false
         player?.stop()
         player = nil
         isPlaying = false
@@ -104,14 +128,23 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
         currentIndex = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        // An explicit stop clears the resume point; it never deletes music or playlists.
+        do {
+            if FileManager.default.fileExists(atPath: checkpointURL.path) {
+                try FileManager.default.removeItem(at: checkpointURL)
+            }
+        } catch {
+            errorMessage = "Could not clear the saved playback position. \(error.localizedDescription)"
+        }
     }
 
     func seek(to seconds: TimeInterval) {
-        guard let player, seconds.isFinite else { return }
-        let newTime = min(max(0, seconds), player.duration)
-        player.currentTime = newTime
+        guard currentTrack != nil, seconds.isFinite else { return }
+        let newTime = min(max(0, seconds), player?.duration ?? duration)
+        player?.currentTime = newTime
         elapsed = newTime
         refreshNowPlaying()
+        saveCheckpoint()
     }
 
     func previous() {
@@ -141,6 +174,7 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
             isPlaying = false
             if automatically { elapsed = duration }
             refreshNowPlaying()
+            saveCheckpoint()
         }
     }
 
@@ -156,6 +190,7 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
             queue = originalOrder
             currentIndex = queue.firstIndex { $0.id == currentID }
         }
+        saveCheckpoint()
     }
 
     func jump(to index: Int) {
@@ -177,6 +212,7 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
         if let originalCurrent = originalOrder.firstIndex(where: { $0.id == currentID }) {
             originalOrder.insert(track, at: min(originalCurrent + 1, originalOrder.count))
         } else { originalOrder.append(track) }
+        saveCheckpoint()
     }
 
     func removeFromQueue(id: String) {
@@ -185,6 +221,7 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
         queue.removeAll { $0.id == id }
         originalOrder.removeAll { $0.id == id }
         currentIndex = queue.firstIndex { $0.id == currentID }
+        saveCheckpoint()
     }
 
     // Keep the playing file until explicit deletion, but remove missing upcoming
@@ -196,6 +233,7 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
         originalOrder = originalOrder.compactMap { available[$0.id] ?? ($0.id == current?.id ? $0 : nil) }
         currentIndex = queue.firstIndex { $0.id == current?.id }
         refreshNowPlaying()
+        saveCheckpoint()
     }
 
     func prepareForDeletion(_ track: Track) {
@@ -203,13 +241,13 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
         else { removeFromQueue(id: track.id) }
     }
 
-    private func loadCurrentTrack(autoplay: Bool) {
+    private func loadCurrentTrack(autoplay: Bool, position: TimeInterval = 0) {
         player?.stop()
         player = nil
-        elapsed = 0
-        duration = 0
         isPlaying = false
         guard let track = currentTrack else { return }
+        duration = track.duration.isFinite ? max(0, track.duration) : 0
+        elapsed = position.isFinite ? max(0, position) : 0
         let url = documentsURL.appendingPathComponent(track.id).standardizedFileURL
         guard url.path.hasPrefix(documentsURL.standardizedFileURL.path + "/") else {
             report(PlaybackError.invalidPath)
@@ -222,11 +260,15 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
             guard nextPlayer.prepareToPlay() else { throw PlaybackError.couldNotPlay }
             player = nextPlayer
             duration = nextPlayer.duration
+            let restoredPosition = position.isFinite ? min(max(0, position), duration) : 0
+            nextPlayer.currentTime = restoredPosition
+            elapsed = restoredPosition
             if autoplay {
                 guard nextPlayer.play() else { throw PlaybackError.couldNotPlay }
                 isPlaying = true
             }
             refreshNowPlaying()
+            saveCheckpoint()
         } catch { report(error) }
     }
 
@@ -239,6 +281,7 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
     private func tick() {
         guard let player else { return }
         if isPlaying { elapsed = player.currentTime }
+        if isPlaying && Date().timeIntervalSince(lastCheckpointTime) >= 5 { saveCheckpoint() }
     }
 
     private func report(_ error: Error) {
@@ -247,6 +290,7 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
         isPlaying = false
         errorMessage = "Could not play \(currentTrack?.filename ?? "this file"). The file may be incomplete, protected, or use an unsupported codec.\n\n\(error.localizedDescription)"
         refreshNowPlaying()
+        saveCheckpoint()
     }
 
     private func refreshNowPlaying() {
@@ -312,9 +356,11 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
             let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
         switch type {
         case .began:
-            resumeAfterInterruption = isPlaying
+            if !interruptionActive { resumeAfterInterruption = isPlaying }
+            interruptionActive = true
             pausePlayer()
         case .ended:
+            interruptionActive = false
             let rawOptions = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
             let shouldResume = resumeAfterInterruption
             resumeAfterInterruption = false
@@ -336,10 +382,81 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
     }
 
     private func mediaServicesReset() {
+        // Apple may invalidate the player. Keep its last known position and
+        // wait for a deliberate Play action before reactivating audio.
         let position = elapsed
+        resumeAfterInterruption = false
         player = nil
-        loadCurrentTrack(autoplay: false)
-        seek(to: position)
+        isPlaying = false
+        elapsed = position
+        refreshNowPlaying()
+        saveCheckpoint()
+    }
+
+    // A checkpoint contains only IDs and playback settings, never audio or
+    // artwork. Wait for a successful library scan and restore paused: launching
+    // the app must not unexpectedly begin playing through the speaker.
+    func restoreIfNeeded(with tracks: [Track]) {
+        guard let saved = pendingCheckpoint else { return }
+        let available = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
+        guard saved.queueIDs.allSatisfy({ available[$0] != nil }),
+              saved.originalIDs.allSatisfy({ available[$0] != nil }) else {
+            errorMessage = "The last queue could not be restored because some music files are missing. The saved queue was kept; copy the missing files back and rescan."
+            return
+        }
+        restoringCheckpoint = true
+        queue = saved.queueIDs.compactMap { available[$0] }
+        originalOrder = saved.originalIDs.compactMap { available[$0] }
+        currentIndex = saved.currentIndex
+        isShuffled = saved.shuffled
+        repeatMode = RepeatMode(rawValue: saved.repeatMode) ?? .off
+        duration = currentTrack?.duration ?? 0
+        elapsed = duration.isFinite && duration > 0 ? min(saved.position, duration) : saved.position
+        isPlaying = false
+        pendingCheckpoint = nil
+        restoringCheckpoint = false
+        refreshNowPlaying()
+    }
+
+    private func saveCheckpoint() {
+        guard !restoringCheckpoint, pendingCheckpoint == nil,
+              let currentIndex, queue.indices.contains(currentIndex) else { return }
+        let position = player?.currentTime ?? elapsed
+        guard position.isFinite else { return }
+        let saved = PlaybackCheckpoint(version: 1, queueIDs: queue.map(\.id),
+            originalIDs: originalOrder.map(\.id), currentIndex: currentIndex,
+            position: max(0, position), shuffled: isShuffled, repeatMode: repeatMode.rawValue)
+        do {
+            guard saved.queueIDs.count <= 50000, saved.originalIDs.count <= 50000 else {
+                throw PlaybackError.queueTooLarge
+            }
+            let data = try JSONEncoder().encode(saved)
+            guard data.count <= 4 * 1024 * 1024 else { throw PlaybackError.queueTooLarge }
+            try FileManager.default.createDirectory(at: checkpointURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
+            try data.write(to: checkpointURL, options: .atomic)
+            lastCheckpointTime = Date()
+        } catch {
+            // Limit retries while still keeping playback functional.
+            lastCheckpointTime = Date()
+            if errorMessage == nil {
+                errorMessage = "Could not save the playback position. Music can still play, but the queue may not resume after a restart. \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private static func readCheckpoint(from url: URL) -> PlaybackCheckpoint? {
+        guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              size <= 4 * 1024 * 1024,
+              let data = try? Data(contentsOf: url),
+              let saved = try? JSONDecoder().decode(PlaybackCheckpoint.self, from: data),
+              saved.version == 1, !saved.queueIDs.isEmpty,
+              saved.queueIDs.count <= 50000, saved.originalIDs.count <= 50000,
+              saved.queueIDs.indices.contains(saved.currentIndex),
+              saved.originalIDs.contains(saved.queueIDs[saved.currentIndex]),
+              saved.position.isFinite, saved.position >= 0,
+              RepeatMode(rawValue: saved.repeatMode) != nil else { return nil }
+        return saved
     }
 
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
@@ -358,13 +475,25 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
     }
 }
 
+private struct PlaybackCheckpoint: Codable {
+    let version: Int
+    let queueIDs: [String]
+    let originalIDs: [String]
+    let currentIndex: Int
+    let position: TimeInterval
+    let shuffled: Bool
+    let repeatMode: String
+}
+
 private enum PlaybackError: LocalizedError {
-    case couldNotPlay, invalidPath, decodeFailed
+    case couldNotPlay, invalidPath, decodeFailed, queueTooLarge
     var errorDescription: String? {
         switch self {
         case .couldNotPlay: return "iOS could not prepare or start this audio file."
         case .invalidPath: return "This file is outside the app’s music folder."
         case .decodeFailed: return "iOS could not decode the audio file."
+        case .queueTooLarge: return "The playback queue is too large to save."
         }
     }
 }
+
