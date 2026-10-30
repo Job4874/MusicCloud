@@ -1,8 +1,8 @@
 # MusicCloud for iPhone
 
-**Version 1.6 · Build 7 · iOS 16 or later.** A native SwiftUI player for audio stored on your iPhone. Playback works offline after copying files. The source contains no music, private library fixtures, accounts, advertisements or analytics. Wi-Fi upload starts a temporary local server only when requested.
+**Version 1.7 · Build 8 · iOS 16 or later.** A native SwiftUI player for audio stored on your iPhone. Playback works offline after copying files. The source contains no music, private library fixtures, accounts, advertisements or analytics. Wi-Fi upload starts a temporary local server only when requested.
 
-The build produces an **unsigned IPA**. It still requires device signing and installation. This release has not been claimed as signed, installed or tested on a physical iPhone.
+The build produces an **unsigned IPA**, which requires device signing and installation. Version 1.7/build 8 was signed and installed over USB on an existing installation, retaining its effective bundle identifier, signing team and library data. Signing credentials and personal device evidence stay outside this repository.
 
 ## Build from Windows
 
@@ -17,9 +17,11 @@ On a macOS machine with Xcode, the shared project/scheme is `MusicCloud.xcodepro
 ## Playback and editing
 
 - Search the local library by title, artist, album or filename; browse artists/albums, favorites and ordered playlists.
+- Search playlists by name. Compact playlist headers keep artwork, availability counts and Play/Shuffle close to the songs.
+- Library, Playlists and Transfer stay accessible below the mini-player. iOS 26 uses a native tab bottom accessory; earlier systems reserve player space inside each tab's navigation content.
 - Edit title, artist and album as display overrides. Audio bytes and path-based identities stay unchanged.
 - Inspect and reorder the queue, play next, seek, shuffle and repeat. Repeated songs have separate queue-occurrence IDs.
-- Queue, order, position, shuffle and repeat checkpoints survive app restarts. Reopening restores the saved position paused.
+- Queue, order, position, shuffle, repeat and source playlist checkpoints survive app restarts. Reopening restores the saved position paused. The player names the playlist or library view that started the queue. Older v1/v2 checkpoints remain readable and use the library title when no origin was saved.
 - Background audio and lock-screen/Control Center controls use Apple's audio frameworks. Calls pause playback; resumption requires prior playback and iOS permission to resume. Headphone disconnection pauses audio. iOS can still terminate the process.
 
 Indexed extensions are MP3, M4A, AAC, WAV, AIF/AIFF, FLAC and CAF. Playback depends on the codec and iOS support. Protected subscription downloads are not standalone playable imports.
@@ -58,7 +60,8 @@ bash iphone/check-queue.sh
 bash iphone/build-unsigned.sh
 ```
 
-These compile the implementation and use synthetic fixtures for model/schema handling, lossless export retention, production migration, artwork, HTTP upload rules and duplicate queue recovery. They are not real-device playback, networking, signing or migration tests. The `c65bc97` baseline passed the Codemagic build and these checks; later changes require another run.
+These compile the implementation and use synthetic fixtures for model/schema handling, lossless export retention, production migration, artwork, HTTP upload rules and duplicate queue/context recovery. The [1.7/build 8 Codemagic run](https://codemagic.io/app/6ae4ccd5d705292f6c4a0ef1/build/6ae4e586efa74786046f38ab) passed all six check groups and the native ARM64 Release build at commit `25cec0a`.
+
+Separate physical iPhone checks verified the installed version and signing identity, retained rich playlist data and artwork, visible tab navigation, playlist playback origin, playback through a short Home-screen/background interval, and exact paused track/playlist/position recovery after a full process restart. A live local-network test loaded the upload page, rejected invalid tokens and foreign origins, uploaded generated silent WAV audio, and verified its phone checksum. The generated test file was removed after exact identity checks; existing upload files and saved library state stayed unchanged. Real incoming-call interruption and hardware lock-screen controls still require device testing; synthetic queue checks do not establish those behaviors.
 
 Before relying on an installed update, verify your playlist/favorite counts, missing records, artwork and edited metadata; restart to check persistence; test a duplicate-song queue and call interruption; then try a small Wi-Fi and USB transfer. Export a new backup and retain the original data until those checks pass.
-
