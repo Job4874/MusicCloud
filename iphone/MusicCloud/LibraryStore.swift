@@ -18,6 +18,8 @@ final class LibraryStore: ObservableObject {
     private var canSave = true
     private var scanTask: Task<Void, Never>?
     private var scanGeneration = UUID()
+    // Keep file metadata separate from display edits so a reset reveals the original tags.
+    private var scannedTracks: [Track] = []
 
     init() {
         let fm = FileManager.default
@@ -30,7 +32,10 @@ final class LibraryStore: ObservableObject {
             try fm.createDirectory(at: support, withIntermediateDirectories: true)
             if fm.fileExists(atPath: stateURL.path) {
                 let decoded = try JSONDecoder().decode(LibraryState.self, from: Data(contentsOf: stateURL))
-                guard decoded.version == 1 else { throw StoreError.unsupportedVersion }
+                guard (decoded.version == 1 && decoded.trackOverrides == nil) ||
+                    (decoded.version == 2 && decoded.trackOverrides != nil) else {
+                    throw StoreError.unsupportedVersion
+                }
                 state = decoded
             }
         } catch {
@@ -66,7 +71,7 @@ final class LibraryStore: ObservableObject {
         scanGeneration = generation
         isScanning = true
         let root = documentsURL
-        let cache = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
+        let cache = Dictionary(uniqueKeysWithValues: scannedTracks.map { ($0.id, $0) })
         scanTask = Task {
             let worker = Task.detached(priority: .userInitiated) {
                 await Self.scan(root: root, cache: cache)
@@ -75,10 +80,69 @@ final class LibraryStore: ObservableObject {
                 await worker.value
             }, onCancel: { worker.cancel() })
             guard !Task.isCancelled, scanGeneration == generation else { return }
-            tracks = result.tracks
+            scannedTracks = result.tracks
+            applyMetadataOverrides()
             isScanning = false
             lastScan = Date()
             if let error = result.error { message = error }
+        }
+    }
+
+    private func applyMetadataOverrides() {
+        tracks = scannedTracks.map { track in
+            guard let edit = state.trackOverrides?[track.id] else { return track }
+            return Track(id: track.id, title: edit.title, artist: edit.artist, album: edit.album,
+                duration: track.duration, artwork: track.artwork, byteCount: track.byteCount,
+                modifiedAt: track.modifiedAt)
+        }.sorted {
+            let lhs = $0.title.musicSortKey, rhs = $1.title.musicSortKey
+            return lhs == rhs ? $0.id < $1.id : lhs < rhs
+        }
+    }
+
+    @discardableResult
+    func editMetadata(id: String, title: String, artist: String, album: String) -> Bool {
+        guard canSave, scannedTracks.contains(where: { $0.id == id }) else {
+            message = "Changes could not be saved. Check the library state and try again."
+            return false
+        }
+        let values = [title, artist, album].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard values.allSatisfy({ !$0.isEmpty && $0.count <= 500 }) else {
+            message = "Enter a title, artist, and album, each under 500 characters."
+            return false
+        }
+        var edits = state.trackOverrides ?? [:]
+        edits[id] = TrackMetadataOverride(title: values[0], artist: values[1], album: values[2])
+        let previous = state
+        state.version = 2
+        state.trackOverrides = edits
+        guard saveMetadataState() else { state = previous; return false }
+        applyMetadataOverrides()
+        return true
+    }
+
+    @discardableResult
+    func resetMetadata(id: String) -> Bool {
+        guard canSave else { message = "Changes cannot be saved until the library state is restored."; return false }
+        let previous = state
+        var edits = state.trackOverrides ?? [:]
+        edits.removeValue(forKey: id)
+        state.version = 2
+        state.trackOverrides = edits
+        guard saveMetadataState() else { state = previous; return false }
+        applyMetadataOverrides()
+        return true
+    }
+
+    private func saveMetadataState() -> Bool {
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(state).write(to: stateURL, options: .atomic)
+            return true
+        } catch {
+            message = "Could not save song details: \(error.localizedDescription)"
+            return false
         }
     }
 
@@ -141,11 +205,13 @@ final class LibraryStore: ObservableObject {
         do {
             try FileManager.default.removeItem(at: url)
             state.favoriteIDs.remove(track.id)
+            state.trackOverrides?.removeValue(forKey: track.id)
             for index in state.playlists.indices {
                 state.playlists[index].trackIDs.removeAll { $0 == track.id }
             }
             save()
             tracks.removeAll { $0.id == track.id }
+            scannedTracks.removeAll { $0.id == track.id }
             rescan()
         } catch {
             message = "Could not delete \(track.filename): \(error.localizedDescription)"
@@ -246,21 +312,46 @@ final class LibraryStore: ObservableObject {
     // It is only applied after a separate replacement confirmation in the UI.
     func restoreBackup(_ data: Data) throws {
         guard data.count <= 10 * 1024 * 1024 else { throw StoreError.invalidBackup }
-        let decoded = try JSONDecoder().decode(LibraryState.self, from: data)
-        guard decoded.version == 1 else { throw StoreError.unsupportedVersion }
+        var decoded = try JSONDecoder().decode(LibraryState.self, from: data)
+        guard decoded.version == 1 || (decoded.version == 2 && decoded.trackOverrides != nil) else {
+            throw StoreError.unsupportedVersion
+        }
+        // If existing state could not be read, we cannot preserve its edits from
+        // a legacy backup. A v2 restore explicitly replaces edits after consent.
+        if !canSave && decoded.version == 1 && decoded.trackOverrides == nil {
+            throw StoreError.cannotPreserveEdits
+        }
+        // Old backups know nothing about song edits. Preserve the current edits
+        // instead of silently deleting them. A v2 backup replaces them.
+        if decoded.version == 1 && decoded.trackOverrides == nil, state.version == 2 {
+            decoded.version = 2
+            decoded.trackOverrides = state.trackOverrides ?? [:]
+        } else if decoded.version == 1 && decoded.trackOverrides != nil {
+            // Support backups from an early draft without letting v1 writers erase edits.
+            decoded.version = 2
+        }
         guard Set(decoded.playlists.map(\.id)).count == decoded.playlists.count,
             decoded.playlists.allSatisfy({ playlist in
                 !playlist.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     && Set(playlist.trackIDs).count == playlist.trackIDs.count
                     && playlist.trackIDs.allSatisfy({ !$0.isEmpty && safeURL(for: $0) != nil })
-            }), decoded.favoriteIDs.allSatisfy({ !$0.isEmpty && safeURL(for: $0) != nil })
+            }), decoded.favoriteIDs.allSatisfy({ !$0.isEmpty && safeURL(for: $0) != nil }),
+            (decoded.trackOverrides ?? [:]).allSatisfy({ id, edit in
+                !id.isEmpty && safeURL(for: id) != nil &&
+                    [edit.title, edit.artist, edit.album].allSatisfy {
+                        !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.count <= 500
+                    }
+            })
         else { throw StoreError.invalidBackup }
         // Complete the atomic write first, preserving current in-memory state
         // if the device has no free space or cannot write the replacement.
-        try data.write(to: stateURL, options: .atomic)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(decoded).write(to: stateURL, options: .atomic)
         state = decoded
+        applyMetadataOverrides()
         canSave = true
-        message = "Restored \(decoded.playlists.count) playlists and \(decoded.favoriteIDs.count) favorites. Missing files will reappear when copied to their original paths."
+        message = "Restored \(decoded.playlists.count) playlists and \(decoded.favoriteIDs.count) favorites. Song edits were preserved or replaced as described before restore. Missing files will reappear when copied to their original paths."
     }
 
     private func save() {
@@ -356,12 +447,14 @@ final class LibraryStore: ObservableObject {
 }
 
 private enum StoreError: LocalizedError {
-    case notRegularFile, unsupportedVersion, invalidBackup
+    case notRegularFile, unsupportedVersion, invalidBackup, cannotPreserveEdits
     var errorDescription: String? {
         switch self {
         case .notRegularFile: return "The selected item is not a regular audio file."
         case .unsupportedVersion: return "This library state was created by a different app version."
         case .invalidBackup: return "This is not a valid MusicCloud playlist backup, or it exceeds 10 MB."
+        case .cannotPreserveEdits: return "The existing library state could not be read, so song edits cannot be preserved from this older backup. No data was changed. Preserve the existing library data before recovery."
         }
     }
 }
+

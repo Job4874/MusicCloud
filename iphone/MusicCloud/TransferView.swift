@@ -42,17 +42,17 @@ struct TransferView: View {
                 Button { library.rescan() } label: { Label("Rescan music", systemImage: "arrow.clockwise") }
                     .disabled(library.isScanning)
             }.listRowBackground(Theme.surface)
-            Section("Favorites and playlist backup") {
+            Section("Library backup") {
                 Button {
                     do {
                         backupDocument = PlaylistBackup(data: try library.makeBackup())
                         showExport = true
                     } catch { library.message = "Could not prepare backup: \(error.localizedDescription)" }
-                } label: { Label("Export playlist backup", systemImage: "square.and.arrow.up") }
-                Button { showRestore = true } label: { Label("Restore playlist backup", systemImage: "arrow.counterclockwise") }
+                } label: { Label("Export library backup", systemImage: "square.and.arrow.up") }
+                Button { showRestore = true } label: { Label("Restore library backup", systemImage: "arrow.counterclockwise") }
                     .disabled(isReadingBackup)
                 if isReadingBackup { ProgressView("Opening backup…") }
-                Text("Save the JSON file in On My iPhone → MusicCloud, then copy it to your computer in Apple Devices. The backup includes favorites and ordered playlists; keep separate copies of your audio.")
+                Text("Save the JSON file in On My iPhone → MusicCloud, then copy it to your computer in Apple Devices. The backup includes favorites, ordered playlists, and song detail edits; keep separate copies of your audio.")
                     .font(.caption).foregroundStyle(.secondary)
             }.listRowBackground(Theme.surface)
             Section("Formats and backups") {
@@ -87,7 +87,7 @@ struct TransferView: View {
             case .failure(let error): library.message = "Backup was not opened: \(error.localizedDescription)"
             }
         }
-        .confirmationDialog("Replace favorites and playlists?", isPresented: Binding(get: { pendingRestore != nil },
+        .confirmationDialog("Restore library backup?", isPresented: Binding(get: { pendingRestore != nil },
             set: { if !$0 { pendingRestore = nil } }), titleVisibility: .visible) {
                 if let data = pendingRestore {
                     Button("Replace from backup", role: .destructive) {
@@ -97,7 +97,7 @@ struct TransferView: View {
                     }
                 }
             } message: {
-                Text("This replaces saved favorites and playlists with those in the JSON file. Audio files are not changed. Export your current lists first if you want to keep them.")
+                Text("This replaces favorites and playlists. A newer-format backup replaces all current song edits, even if it contains none; an older-format backup preserves current song edits. Audio files are not changed. Export your current library first if you want to keep it.")
             }
     }
 }
@@ -133,3 +133,4 @@ private struct TransferStep: View {
         }.padding(.vertical, 8)
     }
 }
+

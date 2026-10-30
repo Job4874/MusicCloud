@@ -22,10 +22,20 @@ struct Playlist: Identifiable, Codable, Equatable {
     var trackIDs: [String] = []
 }
 
+// Display-only edits. Audio files and path-based identities stay unchanged.
+struct TrackMetadataOverride: Codable, Equatable {
+    var title: String
+    var artist: String
+    var album: String
+}
+
 struct LibraryState: Codable {
     var version = 1
     var favoriteIDs: Set<String> = []
     var playlists: [Playlist] = []
+    // v1 has no edits. v2 always includes this dictionary, even when empty.
+    // Optional permits decoding old v1 files without a migration write.
+    var trackOverrides: [String: TrackMetadataOverride]? = nil
 }
 
 enum RepeatMode: String, CaseIterable {
@@ -62,3 +72,4 @@ extension TimeInterval {
 extension String {
     var musicSortKey: String { folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current) }
 }
+

@@ -201,6 +201,7 @@ struct TrackRow: View {
     let track: Track
     let context: [Track]
     @State private var confirmDelete = false
+    @State private var showEdit = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -221,6 +222,7 @@ struct TrackRow: View {
                 }.contentShape(Rectangle())
             }.buttonStyle(.plain)
             Menu {
+                Button { showEdit = true } label: { Label("Edit song details", systemImage: "pencil") }
                 Button { playback.playNext(track) } label: { Label("Play next", systemImage: "text.line.first.and.arrowtriangle.forward") }
                 Button { library.toggleFavorite(track) } label: {
                     Label(library.state.favoriteIDs.contains(track.id) ? "Remove favorite" : "Favorite",
@@ -243,6 +245,7 @@ struct TrackRow: View {
             }.accessibilityLabel("Options for \(track.title)")
         }
         .padding(.vertical, 3)
+        .sheet(isPresented: $showEdit) { EditSongDetailsView(track: track) }
         .confirmationDialog("Delete \(track.title)?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete file from iPhone", role: .destructive) {
                 playback.prepareForDeletion(track)
@@ -251,6 +254,59 @@ struct TrackRow: View {
         } message: {
             Text("This removes the audio file, its favorite, and its playlist entries from this iPhone. Keep a backup on your computer.")
         }
+    }
+}
+
+@MainActor
+private struct EditSongDetailsView: View {
+    @EnvironmentObject private var library: LibraryStore
+    @Environment(\.dismiss) private var dismiss
+    let track: Track
+    @State private var title: String
+    @State private var artist: String
+    @State private var album: String
+    @State private var error: String?
+
+    init(track: Track) {
+        self.track = track
+        _title = State(initialValue: track.title)
+        _artist = State(initialValue: track.artist)
+        _album = State(initialValue: track.album)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Song details") {
+                    TextField("Title", text: $title)
+                    TextField("Artist", text: $artist)
+                    TextField("Album", text: $album)
+                }
+                Section {
+                    Text("Changes appear in MusicCloud. The original audio file is unchanged.")
+                        .foregroundStyle(.secondary)
+                    if let error { Text(error).foregroundStyle(.red) }
+                    if library.state.trackOverrides?[track.id] != nil {
+                        Button("Restore original details") {
+                            if library.resetMetadata(id: track.id) { dismiss() }
+                            else { error = library.message ?? "Could not restore original details." }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Edit song")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        if library.editMetadata(id: track.id, title: title, artist: artist, album: album) { dismiss() }
+                        else { error = library.message ?? "Could not save song details." }
+                    }
+                }
+            }
+        }
+        .preferredColorScheme(.dark).tint(Theme.accent)
     }
 }
 
@@ -296,3 +352,4 @@ private struct EmptyLibraryView: View {
         }.frame(maxWidth: .infinity).padding(.vertical, 32)
     }
 }
+
