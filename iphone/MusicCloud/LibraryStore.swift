@@ -30,18 +30,13 @@ final class LibraryStore: ObservableObject {
             .appendingPathComponent("MusicCloud", isDirectory: true)
         stateURL = support.appendingPathComponent("library-state.json")
         do {
+            state = try LibraryStateReader.read(documentsURL: documentsURL, stateURL: stateURL)
             try fm.createDirectory(at: documentsURL, withIntermediateDirectories: true)
             try fm.createDirectory(at: support, withIntermediateDirectories: true)
-            if fm.fileExists(atPath: stateURL.path) {
-                let data = try Data(contentsOf: stateURL)
-                try LibrarySchemaGuard.validate(data)
-                let decoded = try JSONDecoder().decode(LibraryState.self, from: data)
-                guard (decoded.version == 1 && decoded.trackOverrides == nil) ||
-                    (decoded.version == 2 && decoded.trackOverrides != nil) else {
-                    throw StoreError.unsupportedVersion
-                }
-                state = decoded
-            }
+        } catch LibrarySchemaError.incompatibleLayout {
+            isLibraryProtected = true
+            canSave = false
+            message = "This build cannot open the saved playlists and artwork from your installed MusicCloud version. No files were changed. Keep the current app until a verified migration is available."
         } catch LibrarySchemaError.newerLibrary {
             isLibraryProtected = true
             canSave = false

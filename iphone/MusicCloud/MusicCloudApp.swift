@@ -9,7 +9,7 @@ struct MusicCloudApp: App {
     init() {
         let store = LibraryStore()
         _library = StateObject(wrappedValue: store)
-        _playback = StateObject(wrappedValue: PlaybackController(documentsURL: store.documentsURL))
+        _playback = StateObject(wrappedValue: PlaybackController(documentsURL: store.documentsURL, isEnabled: !store.isLibraryProtected))
     }
 
     var body: some Scene {

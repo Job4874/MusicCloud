@@ -40,3 +40,75 @@ do {
 } catch LibrarySchemaError.invalidJSON { }
 print("Schema guard checks passed: known v1/v2 accepted; newer and malformed fields rejected.")
 
+
+
+// Exercise the exact read-only startup routine with real temporary directories.
+// Fixtures are synthetic and contain no user library data.
+func expectBytes(_ url: URL, equalTo expected: Data) throws {
+    let actual = try Data(contentsOf: url)
+    precondition(actual == expected, "Startup must preserve existing bytes.")
+}
+
+func verifyStartupPreflight() throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("MusicCloud-startup-\(UUID().uuidString)", isDirectory: true)
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: root) }
+    let docs = root.appendingPathComponent("Documents", isDirectory: true)
+    let support = root.appendingPathComponent("Library/Application Support/MusicCloud", isDirectory: true)
+    let stateURL = support.appendingPathComponent("library-state.json")
+    let fresh = try LibraryStateReader.read(documentsURL: docs, stateURL: stateURL)
+    precondition(fresh.playlists.isEmpty)
+    precondition(!fm.fileExists(atPath: docs.path) && !fm.fileExists(atPath: support.path),
+        "Reading a fresh installation must not create directories.")
+    try fm.createDirectory(at: docs, withIntermediateDirectories: true)
+    let audio = docs.appendingPathComponent("example.m4a")
+    let sentinel = Data("synthetic audio sentinel".utf8)
+    try sentinel.write(to: audio)
+    _ = try LibraryStateReader.read(documentsURL: docs, stateURL: stateURL)
+    try expectBytes(audio, equalTo: sentinel)
+
+    // Every observed 1.5 sidecar must protect an otherwise empty draft state.
+    for name in LibraryStateReader.incompatibleDocumentNames.sorted() {
+        let marker = docs.appendingPathComponent(name)
+        let markerData = Data("synthetic preserved sidecar".utf8)
+        try markerData.write(to: marker)
+        do {
+            _ = try LibraryStateReader.read(documentsURL: docs, stateURL: stateURL)
+            preconditionFailure("A newer Documents layout must not open as an empty library.")
+        } catch LibrarySchemaError.incompatibleLayout { }
+        precondition(!fm.fileExists(atPath: support.path))
+        try expectBytes(marker, equalTo: markerData)
+        try expectBytes(audio, equalTo: sentinel)
+        try fm.removeItem(at: marker)
+    }
+
+    try fm.createDirectory(at: support, withIntermediateDirectories: true)
+    for data in [bytes, try json(["version": 2, "favoriteIDs": [], "playlists": [], "trackOverrides": [String: Any]()])] {
+        try data.write(to: stateURL)
+        let opened = try LibraryStateReader.read(documentsURL: docs, stateURL: stateURL)
+        let expected = try JSONDecoder().decode(LibraryState.self, from: data)
+        precondition(opened.version == expected.version)
+        try expectBytes(stateURL, equalTo: data)
+    }
+    try bytes.write(to: stateURL)
+    let marker = docs.appendingPathComponent("Artwork.pack")
+    try fm.createDirectory(at: marker, withIntermediateDirectories: false)
+    do {
+        _ = try LibraryStateReader.read(documentsURL: docs, stateURL: stateURL)
+        preconditionFailure("Newer layout must win even when a valid draft state exists.")
+    } catch LibrarySchemaError.incompatibleLayout { }
+    try expectBytes(stateURL, equalTo: bytes)
+    try fm.removeItem(at: marker)
+
+    let malformed = Data("{invalid".utf8)
+    try malformed.write(to: stateURL)
+    do {
+        _ = try LibraryStateReader.read(documentsURL: docs, stateURL: stateURL)
+        preconditionFailure("Malformed state must not be opened as an empty library.")
+    } catch { }
+    try expectBytes(stateURL, equalTo: malformed)
+    try expectBytes(audio, equalTo: sentinel)
+}
+try verifyStartupPreflight()
+print("Startup checks passed: fresh and known layouts open; incompatible and malformed layouts preserve files.")

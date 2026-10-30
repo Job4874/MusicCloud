@@ -39,10 +39,11 @@ struct LibraryState: Codable {
 }
 
 enum LibrarySchemaError: LocalizedError {
-    case invalidJSON, newerLibrary
+    case invalidJSON, newerLibrary, incompatibleLayout
     var errorDescription: String? {
         switch self {
         case .invalidJSON: return "The library data is not a valid MusicCloud object."
+        case .incompatibleLayout: return "Saved playlist or artwork files use a library layout this build cannot open. No files were changed."
         case .newerLibrary: return "This library or backup contains data from a newer MusicCloud version. No data was changed."
         }
     }
@@ -70,6 +71,38 @@ enum LibrarySchemaGuard {
                 guard Set(edit.keys).isSubset(of: overrideKeys) else { throw LibrarySchemaError.newerLibrary }
             }
         }
+    }
+}
+
+
+// Read-only preflight shared by app startup and filesystem regression checks.
+// A container can survive an update while its contents remain incompatible.
+enum LibraryStateReader {
+    static let incompatibleDocumentNames: Set<String> = [
+        ".musiccloud-favorites.json", ".musiccloud-playlist-order.json",
+        ".musiccloud-view.json", ".musiccloud-artwork-import.json",
+        "Artwork-index.json", "Artwork.pack"
+    ]
+
+    static func read(documentsURL: URL, stateURL: URL) throws -> LibraryState {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: documentsURL.path) {
+            // Enumerating names also detects marker directories and broken links.
+            // Permission/enumeration errors propagate before any writes occur.
+            let names = Set(try fm.contentsOfDirectory(atPath: documentsURL.path))
+            guard names.isDisjoint(with: incompatibleDocumentNames) else {
+                throw LibrarySchemaError.incompatibleLayout
+            }
+        }
+        guard fm.fileExists(atPath: stateURL.path) else { return LibraryState() }
+        let data = try Data(contentsOf: stateURL)
+        try LibrarySchemaGuard.validate(data)
+        let state = try JSONDecoder().decode(LibraryState.self, from: data)
+        guard (state.version == 1 && state.trackOverrides == nil) ||
+            (state.version == 2 && state.trackOverrides != nil) else {
+            throw LibrarySchemaError.newerLibrary
+        }
+        return state
     }
 }
 

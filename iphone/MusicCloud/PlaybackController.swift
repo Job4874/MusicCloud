@@ -19,6 +19,7 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
     private var player: AVAudioPlayer?
     private var originalOrder: [Track] = []
     private var timer: Timer?
+    private let isEnabled: Bool
     private let documentsURL: URL
     private var resumeAfterInterruption = false
     private var remoteTargets: [(MPRemoteCommand, Any)] = []
@@ -34,12 +35,15 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
         return queue[currentIndex]
     }
 
-    init(documentsURL: URL) {
+    init(documentsURL: URL, isEnabled: Bool = true) {
+        self.isEnabled = isEnabled
         self.documentsURL = documentsURL
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("MusicCloud", isDirectory: true)
         checkpointURL = support.appendingPathComponent("playback-state.json")
         super.init()
+        // A protected library must not register playback callbacks or touch checkpoints.
+        guard isEnabled else { return }
         pendingCheckpoint = Self.readCheckpoint(from: checkpointURL)
         configureRemoteCommands()
         notificationObservers.append(NotificationCenter.default.addObserver(
@@ -64,7 +68,7 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
     }
 
     func play(_ track: Track, from tracks: [Track]) {
-        guard !tracks.isEmpty else { return }
+        guard isEnabled, !tracks.isEmpty else { return }
         pendingCheckpoint = nil
         originalOrder = tracks
         if isShuffled {
@@ -116,6 +120,7 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
     }
 
     func stop() {
+        guard isEnabled else { return }
         pendingCheckpoint = nil
         resumeAfterInterruption = false
         player?.stop()
@@ -419,6 +424,7 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
     }
 
     private func saveCheckpoint() {
+        guard isEnabled else { return }
         guard !restoringCheckpoint, pendingCheckpoint == nil,
               let currentIndex, queue.indices.contains(currentIndex) else { return }
         let position = player?.currentTime ?? elapsed
