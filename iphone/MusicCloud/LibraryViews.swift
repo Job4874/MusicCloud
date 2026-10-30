@@ -7,24 +7,21 @@ struct RootView: View {
     @EnvironmentObject private var playback: PlaybackController
     @Environment(\.scenePhase) private var scenePhase
     @State private var showNowPlaying = false
+    @State private var selectedTab = RootTab.library
+
+    private enum RootTab: Hashable { case library, playlists, transfer }
 
     var body: some View {
-        TabView {
-            NavigationStack { LibraryView() }
-                .tabItem { Label("Library", systemImage: "square.stack") }
-            NavigationStack { PlaylistsView() }
-                .tabItem { Label("Playlists", systemImage: "music.note.list") }
-            NavigationStack { TransferView() }
-                .tabItem { Label("Transfer", systemImage: "cable.connector") }
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if playback.currentTrack != nil {
-                MiniPlayer { showNowPlaying = true }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(Theme.background)
-            }
-        }
+        Group {
+        if library.isLibraryProtected {
+            VStack(spacing: 16) {
+                Image(systemName: "lock.shield").font(.largeTitle)
+                Text("MusicCloud cannot safely open this library").font(.title2.bold())
+                Text("This build cannot safely use or change the saved library. No library changes were made. Preserve the existing data and use the matching app or a verified migration.")
+                    .multilineTextAlignment(.center)
+            }.padding(24)
+        } else {
+        tabsWithPlayer
         .sheet(isPresented: $showNowPlaying) { NowPlayingView() }
         .alert("MusicCloud", isPresented: Binding(get: { library.message != nil },
             set: { if !$0 { library.message = nil } })) {
@@ -36,7 +33,66 @@ struct RootView: View {
         } message: { Text(playback.errorMessage ?? "") }
         .task { library.rescan() }
         .onChange(of: scenePhase) { phase in if phase == .active { library.rescan() } }
-        .onChange(of: library.tracks) { tracks in playback.reconcile(with: tracks) }
+        .onChange(of: library.tracks) { tracks in
+            if library.lastScanSucceeded { playback.reconcile(with: tracks) }
+        }
+        .onChange(of: library.lastScan) { _ in
+            if library.lastScanSucceeded {
+                playback.restoreIfNeeded(with: library.tracks)
+                playback.reconcile(with: library.tracks)
+            }
+        }
+        }
+        }
+    }
+
+    @ViewBuilder private var tabsWithPlayer: some View {
+        if #available(iOS 26.1, *) {
+            tabs(usesPlayerInset: false)
+                .tabViewBottomAccessory(isEnabled: playback.currentTrack != nil) { miniPlayer }
+                .tabBarMinimizeBehavior(.never)
+        } else if #available(iOS 26.0, *) {
+            tabs(usesPlayerInset: false)
+                .tabViewBottomAccessory { miniPlayer }
+                .tabBarMinimizeBehavior(.never)
+        } else {
+            tabs(usesPlayerInset: true)
+        }
+    }
+
+    private func tabs(usesPlayerInset: Bool) -> some View {
+        TabView(selection: $selectedTab) {
+            NavigationStack { tabScreen(LibraryView(), usesPlayerInset: usesPlayerInset) }
+                .tabItem { Label("Library", systemImage: "square.stack").accessibilityIdentifier("tab.library") }
+                .tag(RootTab.library)
+            NavigationStack { tabScreen(PlaylistsView(), usesPlayerInset: usesPlayerInset) }
+                .tabItem { Label("Playlists", systemImage: "music.note.list").accessibilityIdentifier("tab.playlists") }
+                .tag(RootTab.playlists)
+            NavigationStack { tabScreen(TransferView(), usesPlayerInset: usesPlayerInset) }
+                .tabItem { Label("Transfer", systemImage: "cable.connector").accessibilityIdentifier("tab.transfer") }
+                .tag(RootTab.transfer)
+        }
+        .toolbar(.visible, for: .tabBar)
+    }
+
+    @ViewBuilder private func tabScreen<Content: View>(_ content: Content, usesPlayerInset: Bool) -> some View {
+        if usesPlayerInset {
+            // Older systems reserve player space inside the navigation content,
+            // leaving the TabView itself and its three tab items unobstructed.
+            content
+                .toolbar(.visible, for: .tabBar)
+                .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer.background(Theme.background) }
+        } else {
+            content.toolbar(.visible, for: .tabBar)
+        }
+    }
+
+    @ViewBuilder private var miniPlayer: some View {
+        if playback.currentTrack != nil {
+            MiniPlayer { showNowPlaying = true }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+        }
     }
 }
 
@@ -61,28 +117,26 @@ struct LibraryView: View {
     var body: some View {
         List {
             Section {
-                VStack(alignment: .leading, spacing: 14) {
-                    HStack(spacing: 6) {
-                        Circle().fill(Theme.accent).frame(width: 6, height: 6)
-                        Text("YOUR MUSIC. EVERYWHERE YOU GO.")
-                            .font(.system(size: 10, weight: .bold, design: .rounded)).tracking(1.5)
-                            .foregroundStyle(Theme.subdued)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("Your library").font(.title2.bold())
+                        Spacer(minLength: 8)
+                        Text("\(library.tracks.count) songs").font(.subheadline).foregroundStyle(.secondary)
                     }
-                    Text("Keep it close.").font(.system(size: 34, weight: .bold, design: .rounded))
-                    Text("\(library.tracks.count) songs · \(library.totalSize) · Stored on this iPhone")
+                    Text("\(library.totalSize) stored on this iPhone")
                         .font(.caption).foregroundStyle(.secondary)
                     HStack(spacing: 10) {
-                        Button { playback.playAll(visibleTracks) } label: {
-                            Label("Play all", systemImage: "play.fill").frame(maxWidth: .infinity)
+                        Button { playback.playAll(visibleTracks, contextName: filter == .favorites ? "Favorites" : "Your library") } label: {
+                            Label("Play", systemImage: "play.fill").frame(maxWidth: .infinity)
                         }.buttonStyle(.borderedProminent).foregroundStyle(Theme.background)
-                        Button { playback.playAll(visibleTracks, shuffled: true) } label: {
+                        Button { playback.playAll(visibleTracks, shuffled: true, contextName: filter == .favorites ? "Favorites" : "Your library") } label: {
                             Label("Shuffle", systemImage: "shuffle").frame(maxWidth: .infinity)
                         }.buttonStyle(.bordered)
                     }.disabled(visibleTracks.isEmpty)
                 }
-                .padding(.vertical, 10)
+                .padding(.vertical, 4)
                 .listRowBackground(Theme.background)
-                .listRowInsets(EdgeInsets(top: 8, leading: 4, bottom: 12, trailing: 4))
+                .listRowInsets(EdgeInsets(top: 4, leading: 4, bottom: 8, trailing: 4))
             }
             Section {
                 Picker("Library view", selection: $filter) {
@@ -106,7 +160,7 @@ struct LibraryView: View {
                     groupRows
                 } else {
                     ForEach(visibleTracks) { track in
-                        TrackRow(track: track, context: visibleTracks)
+                        TrackRow(track: track, context: visibleTracks, contextName: filter == .favorites ? "Favorites" : "Your library")
                             .listRowBackground(Theme.surface)
                     }
                 }
@@ -176,17 +230,17 @@ struct TrackCollectionView: View {
                     ArtworkView(data: currentTracks.first?.artwork, size: 180)
                     if let subtitle { Text(subtitle).foregroundStyle(.secondary) }
                     HStack {
-                        Button { playback.playAll(currentTracks) } label: {
+                        Button { playback.playAll(currentTracks, contextName: title) } label: {
                             Label("Play", systemImage: "play.fill").frame(maxWidth: .infinity)
                         }.buttonStyle(.borderedProminent).foregroundStyle(Theme.background)
-                        Button { playback.playAll(currentTracks, shuffled: true) } label: {
+                        Button { playback.playAll(currentTracks, shuffled: true, contextName: title) } label: {
                             Label("Shuffle", systemImage: "shuffle").frame(maxWidth: .infinity)
                         }.buttonStyle(.bordered)
                     }.disabled(currentTracks.isEmpty)
                 }.frame(maxWidth: .infinity).padding(.vertical)
             }.listRowBackground(Theme.background)
             Section("\(currentTracks.count) songs") {
-                ForEach(currentTracks) { TrackRow(track: $0, context: currentTracks).listRowBackground(Theme.surface) }
+                ForEach(currentTracks) { TrackRow(track: $0, context: currentTracks, contextName: title).listRowBackground(Theme.surface) }
             }
         }
         .scrollContentBackground(.hidden).background(Theme.background)
@@ -200,11 +254,18 @@ struct TrackRow: View {
     @EnvironmentObject private var playback: PlaybackController
     let track: Track
     let context: [Track]
+    var playbackIndex: Int? = nil
+    var contextName: String? = nil
+    var playlistID: UUID? = nil
     @State private var confirmDelete = false
+    @State private var showEdit = false
 
     var body: some View {
         HStack(spacing: 12) {
-            Button { playback.play(track, from: context) } label: {
+            Button {
+                if let playbackIndex { playback.play(at: playbackIndex, from: context, contextName: contextName, playlistID: playlistID) }
+                else { playback.play(track, from: context, contextName: contextName, playlistID: playlistID) }
+            } label: {
                 HStack(spacing: 12) {
                     ArtworkView(data: track.artwork, size: 46)
                     VStack(alignment: .leading, spacing: 4) {
@@ -221,6 +282,7 @@ struct TrackRow: View {
                 }.contentShape(Rectangle())
             }.buttonStyle(.plain)
             Menu {
+                Button { showEdit = true } label: { Label("Edit song details", systemImage: "pencil") }
                 Button { playback.playNext(track) } label: { Label("Play next", systemImage: "text.line.first.and.arrowtriangle.forward") }
                 Button { library.toggleFavorite(track) } label: {
                     Label(library.state.favoriteIDs.contains(track.id) ? "Remove favorite" : "Favorite",
@@ -243,14 +305,69 @@ struct TrackRow: View {
             }.accessibilityLabel("Options for \(track.title)")
         }
         .padding(.vertical, 3)
+        .sheet(isPresented: $showEdit) { EditSongDetailsView(track: track) }
         .confirmationDialog("Delete \(track.title)?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete file from iPhone", role: .destructive) {
+                guard library.requireWritableLibrary() else { return }
                 playback.prepareForDeletion(track)
                 library.deleteFile(track)
             }
         } message: {
-            Text("This removes the audio file, its favorite, and its playlist entries from this iPhone. Keep a backup on your computer.")
+            Text("This removes the audio file and its favorite. Playlist entries stay visible as missing files. Keep a backup on your computer.")
         }
+    }
+}
+
+@MainActor
+private struct EditSongDetailsView: View {
+    @EnvironmentObject private var library: LibraryStore
+    @Environment(\.dismiss) private var dismiss
+    let track: Track
+    @State private var title: String
+    @State private var artist: String
+    @State private var album: String
+    @State private var error: String?
+
+    init(track: Track) {
+        self.track = track
+        _title = State(initialValue: track.title)
+        _artist = State(initialValue: track.artist)
+        _album = State(initialValue: track.album)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Song details") {
+                    TextField("Title", text: $title)
+                    TextField("Artist", text: $artist)
+                    TextField("Album", text: $album)
+                }
+                Section {
+                    Text("Changes appear in MusicCloud. The original audio file is unchanged.")
+                        .foregroundStyle(.secondary)
+                    if let error { Text(error).foregroundStyle(.red) }
+                    if library.state.trackOverrides?[track.id] != nil {
+                        Button("Restore original details") {
+                            if library.resetMetadata(id: track.id) { dismiss() }
+                            else { error = library.message ?? "Could not restore original details." }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Edit song")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        if library.editMetadata(id: track.id, title: title, artist: artist, album: album) { dismiss() }
+                        else { error = library.message ?? "Could not save song details." }
+                    }
+                }
+            }
+        }
+        .preferredColorScheme(.dark).tint(Theme.accent)
     }
 }
 
@@ -296,3 +413,5 @@ private struct EmptyLibraryView: View {
         }.frame(maxWidth: .infinity).padding(.vertical, 32)
     }
 }
+
+

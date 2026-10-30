@@ -10,5 +10,6 @@ cleanup_checks() {
   fi
 }
 trap cleanup_checks EXIT
-swiftc "$project_dir/MusicCloud/Models.swift" "$project_dir/Tests/main.swift" -o "$check_dir/model-checks"
+swiftc "$project_dir/MusicCloud/LegacyExportAdapter.swift" "$project_dir/MusicCloud/LegacyLibraryMigration.swift" "$project_dir/MusicCloud/Models.swift" "$project_dir/Tests/main.swift" -o "$check_dir/model-checks"
 "$check_dir/model-checks"
+

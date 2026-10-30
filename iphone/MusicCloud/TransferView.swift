@@ -1,9 +1,12 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import UIKit
 
 @MainActor
 struct TransferView: View {
     @EnvironmentObject private var library: LibraryStore
+    @Environment(\.scenePhase) private var scenePhase
+    @StateObject private var wifi = WiFiUploadServer()
     @State private var showExport = false
     @State private var backupDocument: PlaylistBackup?
     @State private var showRestore = false
@@ -14,13 +17,43 @@ struct TransferView: View {
         List {
             Section {
                 VStack(alignment: .leading, spacing: 14) {
-                    Image(systemName: "cable.connector").font(.system(size: 44, weight: .light)).foregroundStyle(Theme.accent)
-                    Text("Plug in. Fill up. Go.")
+                    Image(systemName: "square.and.arrow.down").font(.system(size: 44, weight: .light)).foregroundStyle(Theme.accent)
+                    Text("Fill up. Take it with you.")
                         .font(.system(size: 30, weight: .bold, design: .rounded))
                     Text("MusicCloud plays files stored on your iPhone. Your computer can be turned off after the copy finishes.")
                         .font(.subheadline).foregroundStyle(.secondary)
                 }.padding(.vertical, 12)
             }.listRowBackground(Theme.background)
+            Section("Wi-Fi upload") {
+                Text("Copy music from your computer over the same private Wi-Fi. Keep your iPhone awake and this screen open until the transfer finishes.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                if let address = wifi.address {
+                    Text(address.absoluteString)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                    HStack(spacing: 24) {
+                        Button { UIPasteboard.general.string = address.absoluteString } label: {
+                            Label("Copy link", systemImage: "doc.on.doc")
+                        }
+                        ShareLink(item: address) { Label("Share link", systemImage: "square.and.arrow.up") }
+                    }.buttonStyle(.borderless)
+                    Text("Open this link in your computer’s browser and choose your audio files. Keep it private: anyone on this Wi-Fi with the link can upload while transfer is running.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if wifi.isStarting { ProgressView() }
+                Text(wifi.status).font(.caption).foregroundStyle(.secondary)
+                Button {
+                    if wifi.isRunning || wifi.isStarting { wifi.stop() }
+                    else if !library.isLibraryProtected {
+                        wifi.start(documentsURL: library.documentsURL) { library.rescan() }
+                    }
+                } label: {
+                    Label(wifi.isRunning || wifi.isStarting ? "Stop Wi-Fi transfer" : "Start Wi-Fi transfer",
+                        systemImage: wifi.isRunning || wifi.isStarting ? "stop.circle" : "wifi")
+                }.disabled(library.isLibraryProtected)
+                Text("Up to 512 MB per file. Each transfer gets a new link. Leaving this screen or sending MusicCloud to the background stops the server and removes unfinished uploads. Completed files stay on your iPhone.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.listRowBackground(Theme.surface)
             Section("From your Windows computer") {
                 TransferStep(number: "1", title: "Connect with a USB cable", detail: "Unlock your iPhone, tap Trust if asked, then open Apple Devices on your computer.")
                 TransferStep(number: "2", title: "Copy files to MusicCloud", detail: "Select your iPhone → Files → MusicCloud. Add your audio files and wait until the transfer finishes. Keep the originals on your computer.")
@@ -42,17 +75,17 @@ struct TransferView: View {
                 Button { library.rescan() } label: { Label("Rescan music", systemImage: "arrow.clockwise") }
                     .disabled(library.isScanning)
             }.listRowBackground(Theme.surface)
-            Section("Favorites and playlist backup") {
+            Section("Library backup") {
                 Button {
                     do {
                         backupDocument = PlaylistBackup(data: try library.makeBackup())
                         showExport = true
                     } catch { library.message = "Could not prepare backup: \(error.localizedDescription)" }
-                } label: { Label("Export playlist backup", systemImage: "square.and.arrow.up") }
-                Button { showRestore = true } label: { Label("Restore playlist backup", systemImage: "arrow.counterclockwise") }
+                } label: { Label("Export library backup", systemImage: "square.and.arrow.up") }
+                Button { showRestore = true } label: { Label("Restore library backup", systemImage: "arrow.counterclockwise") }
                     .disabled(isReadingBackup)
                 if isReadingBackup { ProgressView("Opening backup…") }
-                Text("Save the JSON file in On My iPhone → MusicCloud, then copy it to your computer in Apple Devices. The backup includes favorites and ordered playlists; keep separate copies of your audio.")
+                Text("Save the JSON file in On My iPhone → MusicCloud, then copy it to your computer in Apple Devices. The backup includes favorites, ordered playlists, and song detail edits; keep separate copies of your audio.")
                     .font(.caption).foregroundStyle(.secondary)
             }.listRowBackground(Theme.surface)
             Section("Formats and backups") {
@@ -63,14 +96,18 @@ struct TransferView: View {
                 VStack(alignment: .leading, spacing: 7) {
                     Text("MUSICCLOUD").font(.system(size: 11, weight: .bold)).tracking(3).foregroundStyle(Theme.accent)
                     Text("Personal. Offline. Yours.").font(.subheadline)
-                    Text("No account, advertisements, analytics, server, or app network requests. Only import music you have permission to copy.")
+                    Text("No account, advertisements, or analytics. Wi-Fi transfer runs a temporary local server only when you start it. Only import music you have permission to copy.")
                         .font(.caption).foregroundStyle(.secondary)
-                    Text("Version 1.0 · Source build").font(.caption2).foregroundStyle(Theme.subdued)
+                    Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—") · Build \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—")")
+                        .font(.caption2).foregroundStyle(Theme.subdued)
                 }.padding(.vertical, 8)
             }.listRowBackground(Theme.surface)
         }
         .scrollContentBackground(.hidden).background(Theme.background)
-        .navigationTitle("USB transfer").navigationBarTitleDisplayMode(.inline)
+        .navigationTitle("Transfer").navigationBarTitleDisplayMode(.inline)
+        .onDisappear { wifi.stop() }
+        .onChange(of: scenePhase) { phase in if phase == .background { wifi.stop() } }
+        .onChange(of: library.isLibraryProtected) { protected in if protected { wifi.stop() } }
         .fileExporter(isPresented: $showExport, document: backupDocument, contentType: .json,
             defaultFilename: "MusicCloud-playlists") { result in
                 if case .failure(let error) = result { library.message = "Backup was not exported: \(error.localizedDescription)" }
@@ -87,7 +124,7 @@ struct TransferView: View {
             case .failure(let error): library.message = "Backup was not opened: \(error.localizedDescription)"
             }
         }
-        .confirmationDialog("Replace favorites and playlists?", isPresented: Binding(get: { pendingRestore != nil },
+        .confirmationDialog("Restore library backup?", isPresented: Binding(get: { pendingRestore != nil },
             set: { if !$0 { pendingRestore = nil } }), titleVisibility: .visible) {
                 if let data = pendingRestore {
                     Button("Replace from backup", role: .destructive) {
@@ -97,7 +134,7 @@ struct TransferView: View {
                     }
                 }
             } message: {
-                Text("This replaces saved favorites and playlists with those in the JSON file. Audio files are not changed. Export your current lists first if you want to keep them.")
+                Text("This replaces favorites and playlists. A newer-format backup replaces all current song edits, even if it contains none; an older-format backup preserves current song edits. Audio files are not changed. Export your current library first if you want to keep it.")
             }
     }
 }
@@ -133,3 +170,5 @@ private struct TransferStep: View {
         }.padding(.vertical, 8)
     }
 }
+
+
