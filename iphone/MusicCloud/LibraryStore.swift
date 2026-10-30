@@ -23,6 +23,7 @@ final class LibraryStore: ObservableObject {
     // Keep file metadata separate from display edits so a reset reveals the original tags.
     private var scannedTracks: [Track] = []
     @Published private var playlistArtwork: [UUID: Data] = [:]
+    private var importedDetails: [LegacyRelativePath: LegacyTrackDisplay] = [:]
 
     init() {
         let fm = FileManager.default
@@ -36,12 +37,14 @@ final class LibraryStore: ObservableObject {
             // Validate and bound the complete projection plus its source archive
             // before creating a new state file. Existing source files stay intact.
             let encoded = try Self.encodedState(loaded)
+            let details = try LegacyLibraryMigration.displayMetadata(in: loaded.legacyArchive)
             try fm.createDirectory(at: documentsURL, withIntermediateDirectories: true)
             try fm.createDirectory(at: support, withIntermediateDirectories: true)
             if !fm.fileExists(atPath: stateURL.path) {
                 try encoded.write(to: stateURL, options: .atomic)
             }
             state = loaded
+            importedDetails = details
         } catch LibrarySchemaError.incompatibleLayout {
             isLibraryProtected = true
             canSave = false
@@ -76,11 +79,29 @@ final class LibraryStore: ObservableObject {
     }
 
     func track(id: String) -> Track? { tracks.first { $0.id == id } }
+    func track(for entry: PlaylistEntry) -> Track? {
+        guard let id = entry.trackID, let original = track(id: id) else { return nil }
+        return applyingEntryDetails(entry, to: original)
+    }
+
+    private func applyingEntryDetails(_ entry: PlaylistEntry, to original: Track) -> Track {
+        guard state.trackOverrides?[original.id] == nil else { return original }
+        return Track(id: original.id,
+            title: entry.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? original.title : entry.title,
+            artist: entry.artist.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? original.artist : entry.artist,
+            album: original.album, duration: original.duration, artwork: original.artwork,
+            byteCount: original.byteCount, modifiedAt: original.modifiedAt)
+    }
     func playlist(id: UUID) -> Playlist? { state.playlists.first { $0.id == id } }
     func playlistTracks(_ playlist: Playlist) -> [Track] {
         let byID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
-        let ids = playlist.entries.map { $0.compactMap(\.trackID) } ?? playlist.trackIDs
-        return ids.compactMap { byID[$0] }
+        if let entries = playlist.entries {
+            return entries.compactMap { entry in
+                guard let id = entry.trackID, let track = byID[id] else { return nil }
+                return applyingEntryDetails(entry, to: track)
+            }
+        }
+        return playlist.trackIDs.compactMap { byID[$0] }
     }
 
     func playlistEntryCount(_ playlist: Playlist) -> Int { playlist.entries?.count ?? playlist.trackIDs.count }
@@ -155,8 +176,10 @@ final class LibraryStore: ObservableObject {
 
     private func applyMetadataOverrides() {
         tracks = scannedTracks.map { track in
-            guard let edit = state.trackOverrides?[track.id] else { return track }
-            return Track(id: track.id, title: edit.title, artist: edit.artist, album: edit.album,
+            let edit = state.trackOverrides?[track.id]
+            let detail = (try? LegacyRelativePath(track.id)).flatMap { importedDetails[$0] }
+            return Track(id: track.id, title: edit?.title ?? detail?.title ?? track.title,
+                artist: edit?.artist ?? detail?.artist ?? track.artist, album: edit?.album ?? track.album,
                 duration: track.duration, artwork: track.artwork, byteCount: track.byteCount,
                 modifiedAt: track.modifiedAt)
         }.sorted {
@@ -202,11 +225,12 @@ final class LibraryStore: ObservableObject {
         var candidate = state
         candidate.trackOverrides = edits
         if let original = scannedTracks.first(where: { $0.id == id }) {
+            let detail = (try? LegacyRelativePath(id)).flatMap { importedDetails[$0] }
             for index in candidate.playlists.indices {
                 guard var entries = candidate.playlists[index].entries else { continue }
                 for entryIndex in entries.indices where entries[entryIndex].trackID == id {
-                    entries[entryIndex].title = original.title
-                    entries[entryIndex].artist = original.artist
+                    entries[entryIndex].title = detail?.title ?? original.title
+                    entries[entryIndex].artist = detail?.artist ?? original.artist
                 }
                 setEntries(entries, at: index, in: &candidate)
             }
@@ -301,6 +325,7 @@ final class LibraryStore: ObservableObject {
         guard let url = safeURL(for: track.id) else { return }
         let previous = state
         var candidate = state
+        candidate.favoriteIDs.remove(track.id)
         for index in candidate.playlists.indices where candidate.playlists[index].trackIDs.contains(track.id) {
             var entries = editableEntries(for: candidate.playlists[index])
             for entryIndex in entries.indices where entries[entryIndex].trackID == track.id {
@@ -437,8 +462,10 @@ final class LibraryStore: ObservableObject {
         // Complete the atomic write first, preserving current in-memory state
         // if the device has no free space or cannot write the replacement.
         let mergedData = try Self.encodedState(decoded)
+        let details = try LegacyLibraryMigration.displayMetadata(in: decoded.legacyArchive)
         try mergedData.write(to: stateURL, options: .atomic)
         state = decoded
+        importedDetails = details
         applyMetadataOverrides()
         canSave = true
         message = "Restored \(decoded.playlists.count) playlists and \(decoded.favoriteIDs.count) favorites. Unavailable playlist entries and preserved source data remain in the backup. Missing files will reappear when copied to their original paths."
@@ -578,5 +605,6 @@ private enum StoreError: LocalizedError {
         }
     }
 }
+
 
 

@@ -141,8 +141,8 @@ struct PlaylistDetailView: View {
                         }.listRowBackground(Theme.surface)
                     }
                     ForEach(rows) { row in
-                        if let id = row.trackID, let track = library.track(id: id) {
-                            TrackRow(track: track, context: tracks, playbackIndex: row.playbackIndex)
+                        if let index = row.playbackIndex, tracks.indices.contains(index) {
+                            TrackRow(track: tracks[index], context: tracks, playbackIndex: index)
                                 .listRowBackground(Theme.surface)
                         } else {
                             HStack(spacing: 12) {
@@ -239,4 +239,5 @@ private struct AddSongsView: View {
         }.preferredColorScheme(.dark).tint(Theme.accent)
     }
 }
+
 

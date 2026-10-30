@@ -91,8 +91,109 @@ if case .object(let fields)? = rich.entries?[0].legacyData {
     precondition(fields["futureEntry"] != nil && fields["sourcePosition"] != nil)
 } else { preconditionFailure("Entry raw metadata must be retained.") }
 
+// Display metadata must be path-exact and unambiguous across every occurrence.
+let originalDisplay = try LegacyLibraryMigration.displayMetadata(in: migrated.legacyArchive)
+let conflictPath = try LegacyRelativePath("Music/a.m4a")
+let knownMissingPath = try LegacyRelativePath("Music/missing.m4a")
+precondition(originalDisplay[conflictPath] == nil, "Conflicting occurrence titles must not pick a first match.")
+precondition(originalDisplay[knownMissingPath] == LegacyTrackDisplay(title: "Missing", artist: "Example"))
+func displayEntry(_ path: String, _ title: String, _ artist: String) -> [String: Any] {
+    ["id": "synthetic", "title": title, "artist": artist, "path": path, "status": "downloaded"]
+}
+let displayBytes = try json(["version": 1, "favoriteIDs": [], "playlists": [
+    ["id": "display-one", "name": "One", "trackIDs": [], "entries": [
+        displayEntry("Music/consistent.m4a", " Preserved title ", "Example"),
+        displayEntry("Music/conflict.m4a", "First", "Example"),
+        displayEntry("Music/artist-conflict.m4a", "Same title", "Artist A"),
+        displayEntry("Music/empty.m4a", "Title", " \n"),
+        displayEntry("Music/Case.m4a", "Upper path", "Example")
+    ]],
+    ["id": "display-two", "name": "Two", "trackIDs": [], "entries": [
+        displayEntry("Music/consistent.m4a", " Preserved title ", "Example"),
+        displayEntry("Music/conflict.m4a", "Second", "Example"),
+        displayEntry("Music/conflict.m4a", "First", "Example"),
+        displayEntry("Music/artist-conflict.m4a", "Same title", "Artist B"),
+        displayEntry("Music/case.m4a", "Lower path", "Example")
+    ]]
+]])
+let displayArchive = LegacyLibraryArchive(originalExportData: displayBytes, sourceFilename: newestName, sidecarData: [:])
+let displayProjection = try LegacyLibraryMigration.displayMetadata(in: displayArchive)
+let consistentPath = try LegacyRelativePath("Music/consistent.m4a")
+let titleConflictPath = try LegacyRelativePath("Music/conflict.m4a")
+let artistConflictPath = try LegacyRelativePath("Music/artist-conflict.m4a")
+let emptyPath = try LegacyRelativePath("Music/empty.m4a")
+let upperPath = try LegacyRelativePath("Music/Case.m4a")
+let lowerPath = try LegacyRelativePath("Music/case.m4a")
+precondition(displayProjection.count == 3)
+precondition(displayProjection[consistentPath] == LegacyTrackDisplay(title: " Preserved title ", artist: "Example"))
+precondition(displayProjection[titleConflictPath] == nil && displayProjection[artistConflictPath] == nil && displayProjection[emptyPath] == nil)
+precondition(displayProjection[upperPath]?.title == "Upper path" && displayProjection[lowerPath]?.title == "Lower path")
+let noDisplay = try LegacyLibraryMigration.displayMetadata(in: nil)
+precondition(noDisplay.isEmpty && displayArchive.originalExportData == displayBytes)
+
+// A prepared collection appends to the migrated library exactly once.
+let c = UUID(uuidString: "00000000-0000-0000-0000-000000000003")!
+let d = UUID(uuidString: "00000000-0000-0000-0000-000000000004")!
+let preparedEntryOne = PlaylistEntry(trackID: "Music/prepared-one.m4a", title: "Prepared one", artist: "Example", status: "downloaded", legacyData: .object(["source": .string("synthetic-plan")]))
+let preparedEntryTwo = PlaylistEntry(trackID: "Music/prepared-two.m4a", title: "Prepared two", artist: "Example", status: "downloaded")
+var prepared = LibraryState()
+prepared.playlists = [
+    Playlist(id: c, name: "Prepared one", trackIDs: [preparedEntryOne.trackID!], entries: [preparedEntryOne]),
+    Playlist(id: d, name: "Prepared two", trackIDs: [preparedEntryTwo.trackID!], entries: [preparedEntryTwo])
+]
+let preparedBytes = try JSONEncoder().encode(prepared)
+let preparedURL = docs.appendingPathComponent(LegacyLibraryMigration.preparedFilename)
+try preparedBytes.write(to: preparedURL)
+let preparedBefore = try filesBelow(root)
+let merged = try LibraryStateReader.read(documentsURL: docs, stateURL: target, allowLegacyMigration: true)
+let preparedAfter = try filesBelow(root)
+precondition(preparedBefore == preparedAfter)
+precondition(merged.playlists.map(\.id) == [b, a, c, d])
+precondition(merged.favoriteIDs == migrated.favoriteIDs && merged.trackOverrides == migrated.trackOverrides)
+precondition(merged.legacyArchive == migrated.legacyArchive)
+precondition(merged.playlists[2].entries?[0].legacyData == preparedEntryOne.legacyData)
+
+func rejectPrepared(_ bad: LibraryState) throws {
+    try JSONEncoder().encode(bad).write(to: preparedURL)
+    expectReject { _ = try LibraryStateReader.read(documentsURL: docs, stateURL: target, allowLegacyMigration: true) }
+}
+var badPrepared = prepared
+badPrepared.playlists[0].id = a
+try rejectPrepared(badPrepared)
+badPrepared = prepared
+badPrepared.playlists[1].entries![0].id = preparedEntryOne.id
+try rejectPrepared(badPrepared)
+badPrepared = prepared
+badPrepared.playlists[0].trackIDs = ["../outside.m4a"]
+badPrepared.playlists[0].entries![0].trackID = "../outside.m4a"
+try rejectPrepared(badPrepared)
+badPrepared = prepared
+badPrepared.favoriteIDs = ["Music/unrequested.m4a"]
+try rejectPrepared(badPrepared)
+badPrepared = prepared
+badPrepared.playlists[0].entries = nil
+try rejectPrepared(badPrepared)
+try Data("{invalid".utf8).write(to: preparedURL)
+expectReject { _ = try LibraryStateReader.read(documentsURL: docs, stateURL: target, allowLegacyMigration: true) }
+try preparedBytes.write(to: preparedURL)
+// Cross-library occurrence collisions are also rejected before saving.
+var collidingBase = migrated
+collidingBase.playlists[1].entries![0].id = preparedEntryOne.id
+expectReject { _ = try LegacyLibraryMigration.appendingPreparedPlaylists(to: collidingBase, documentsURL: docs) }
+migrated = merged
+
+// A prepared-only installation needs no legacy export and never opens empty
+// through the default protective reader.
+let preparedOnlyDocs = root.appendingPathComponent("PreparedOnlyDocuments", isDirectory: true)
+let preparedOnlyTarget = root.appendingPathComponent("PreparedOnlySupport/library-state-v3.json")
+try fm.createDirectory(at: preparedOnlyDocs, withIntermediateDirectories: true)
+try preparedBytes.write(to: preparedOnlyDocs.appendingPathComponent(LegacyLibraryMigration.preparedFilename))
+expectReject { _ = try LibraryStateReader.read(documentsURL: preparedOnlyDocs, stateURL: preparedOnlyTarget) }
+let preparedOnly = try LibraryStateReader.read(documentsURL: preparedOnlyDocs, stateURL: preparedOnlyTarget, allowLegacyMigration: true)
+precondition(preparedOnly.playlists.map(\.id) == [c, d] && preparedOnly.favoriteIDs.isEmpty && !fm.fileExists(atPath: preparedOnlyTarget.path))
+
 // Committing is explicitly simulated by this test, never by the reader.
-let stableIDs = rich.entries!.map(\.id)
+let stableIDs = migrated.playlists[1].entries!.map(\.id)
 migrated.playlists[1].name = "Edited after migration"
 migrated.playlists[1].entries![0].title = "Edited title"
 try LibrarySchemaGuard.validateState(migrated)
@@ -103,11 +204,16 @@ try encoded.write(to: target)
 try json([]).write(to: docs.appendingPathComponent(".musiccloud-favorites.json"))
 try json([]).write(to: docs.appendingPathComponent(".musiccloud-playlist-order.json"))
 let restarted = try LibraryStateReader.read(documentsURL: docs, stateURL: target, allowLegacyMigration: true)
+precondition(restarted.playlists.map(\.id) == [b, a, c, d], "The prepared collection must not append again.")
 precondition(restarted.playlists[1].name == "Edited after migration")
 precondition(restarted.playlists[1].entries?[0].title == "Edited title")
 precondition(restarted.playlists[1].entries?.map(\.id) == stableIDs)
 precondition(restarted.favoriteIDs == ["Music/b.m4a"], "Restart must not re-apply original favorites.")
 precondition(restarted.legacyArchive?.originalExportData == sourceBytes)
+try Data("{invalid".utf8).write(to: preparedURL)
+let restartWithMalformedPlan = try LibraryStateReader.read(documentsURL: docs, stateURL: target, allowLegacyMigration: true)
+precondition(restartWithMalformedPlan.playlists.map(\.id) == [b, a, c, d], "An existing v3 library must not reread a leftover plan.")
+try preparedBytes.write(to: preparedURL)
 
 // Unknown structural state fields are rejected, opaque archived fields are kept.
 var unknownState = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
@@ -154,3 +260,4 @@ try oversizedHandle.close()
 expectReject { _ = try LibraryStateReader.read(documentsURL: cleanDocs, stateURL: oversized, allowLegacyMigration: true) }
 
 print("Production migration checks passed: reader is read-only; rich records/raw originals/sidecars retained; v3 restarts preserve edits; unsafe and malformed inputs protect the library.")
+

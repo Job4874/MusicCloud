@@ -1,12 +1,68 @@
 import Foundation
 
+struct LegacyTrackDisplay: Equatable, Sendable {
+    let title: String
+    let artist: String
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.title.utf8.elementsEqual(rhs.title.utf8) && lhs.artist.utf8.elementsEqual(rhs.artist.utf8)
+    }
+}
+
 enum LegacyLibraryMigration {
+    static let preparedFilename = "MusicCloud-prepared-playlists-v3.json"
     static let sidecarNames: Set<String> = [
         ".musiccloud-favorites.json", ".musiccloud-playlist-order.json",
         ".musiccloud-view.json", ".musiccloud-artwork-import.json", "Artwork-index.json"
     ]
     private static let requiredSidecars: Set<String> = [".musiccloud-favorites.json", ".musiccloud-playlist-order.json"]
     private static let maximumSidecarBytes = 4 * 1024 * 1024
+
+    // A prepared collection is appended only while the destination v3 file is
+    // absent. The existing-state reader returns before ever reading this plan.
+    static func appendingPreparedPlaylists(to original: LibraryState, documentsURL: URL) throws -> LibraryState {
+        let url = documentsURL.appendingPathComponent(preparedFilename)
+        guard exists(url) else { return original }
+        try requireContained(url, in: documentsURL)
+        let data = try readBoundedFile(url, maximumBytes: LibraryStateReader.maximumStateBytes)
+        try LibrarySchemaGuard.validate(data)
+        let prepared = try JSONDecoder().decode(LibraryState.self, from: data)
+        guard prepared.version == 3, prepared.legacyArchive == nil, prepared.favoriteIDs.isEmpty,
+            prepared.trackOverrides?.isEmpty == true, prepared.playlists.allSatisfy({ $0.entries != nil }) else {
+            throw LibrarySchemaError.incompatibleLayout
+        }
+        var combined = original
+        combined.playlists.append(contentsOf: prepared.playlists)
+        // This catches collisions with existing playlists/occurrences as well
+        // as malformed paths; no state or source bytes have been written.
+        try LibrarySchemaGuard.validateState(combined)
+        return combined
+    }
+
+    // Some files appear in several source playlists. Apply legacy display text
+    // only when every nonempty pair for that exact path agrees. Conflicting
+    // entries remain preserved in the archive and their individual playlists.
+    static func displayMetadata(in archive: LegacyLibraryArchive?) throws -> [LegacyRelativePath: LegacyTrackDisplay] {
+        guard let archive else { return [:] }
+        let snapshot = try LegacyExportSnapshot(data: archive.originalExportData)
+        var result: [LegacyRelativePath: LegacyTrackDisplay] = [:]
+        var conflicts = Set<LegacyRelativePath>()
+        for playlist in snapshot.playlists {
+            for entry in playlist.entries {
+                guard let path = entry.path, !conflicts.contains(path),
+                    !entry.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                    !entry.artist.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                let display = LegacyTrackDisplay(title: entry.title, artist: entry.artist)
+                if let previous = result[path], previous != display {
+                    result.removeValue(forKey: path)
+                    conflicts.insert(path)
+                } else {
+                    result[path] = display
+                }
+            }
+        }
+        return result
+    }
 
     // Files are read only. The caller owns a separate atomic v3 state commit.
     static func read(documentsURL: URL) throws -> LibraryState {
@@ -194,3 +250,4 @@ enum LegacyLibraryMigration {
         string.count == 64 && string.unicodeScalars.allSatisfy({ (48...57).contains($0.value) || (65...70).contains($0.value) || (97...102).contains($0.value) })
     }
 }
+

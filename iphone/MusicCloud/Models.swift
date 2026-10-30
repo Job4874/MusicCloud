@@ -172,15 +172,24 @@ enum LibraryStateReader {
             if allowLegacyMigration { state = upgraded(state) }
             return state
         }
+        let preparedURL = documentsURL.appendingPathComponent(LegacyLibraryMigration.preparedFilename)
+        if LegacyLibraryMigration.exists(preparedURL), !allowLegacyMigration {
+            throw LibrarySchemaError.incompatibleLayout
+        }
+        var state: LibraryState
         if hasLegacyLayout {
             guard allowLegacyMigration else { throw LibrarySchemaError.incompatibleLayout }
-            return try LegacyLibraryMigration.read(documentsURL: documentsURL)
+            state = try LegacyLibraryMigration.read(documentsURL: documentsURL)
+        } else if let legacyStateURL, LegacyLibraryMigration.exists(legacyStateURL) {
+            let native = try readNative(legacyStateURL)
+            state = allowLegacyMigration ? upgraded(native) : native
+        } else {
+            state = LibraryState()
         }
-        if let legacyStateURL, LegacyLibraryMigration.exists(legacyStateURL) {
-            let state = try readNative(legacyStateURL)
-            return allowLegacyMigration ? upgraded(state) : state
+        if allowLegacyMigration {
+            return try LegacyLibraryMigration.appendingPreparedPlaylists(to: state, documentsURL: documentsURL)
         }
-        return LibraryState()
+        return state
     }
 
     private static func readNative(_ url: URL) throws -> LibraryState {
@@ -231,5 +240,6 @@ extension TimeInterval {
 extension String {
     var musicSortKey: String { folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current) }
 }
+
 
 
