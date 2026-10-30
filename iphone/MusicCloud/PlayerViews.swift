@@ -194,7 +194,7 @@ private struct QueueView: View {
                             }.contentShape(Rectangle())
                         }.buttonStyle(.plain)
                         if index != playback.currentIndex {
-                            Button { playback.removeFromQueue(id: track.id) } label: {
+                            Button { playback.removeFromQueue(at: index) } label: {
                                 Image(systemName: "minus.circle").foregroundStyle(.secondary).frame(width: 34, height: 44)
                             }.buttonStyle(.plain).accessibilityLabel("Remove \(track.title) from queue")
                         }
@@ -209,4 +209,5 @@ private struct QueueView: View {
         }.preferredColorScheme(.dark).tint(Theme.accent)
     }
 }
+
 

@@ -4,6 +4,8 @@ import Foundation
 let ids = ["Music/Artist/Track 02.m4a", "Music/Artist/Track 01.m4a", "日本語/曲.flac"]
 let playlist = Playlist(name: "Evening", trackIDs: ids)
 var state = LibraryState()
+state.version = 1
+state.trackOverrides = nil
 state.playlists = [playlist]
 state.favoriteIDs = [ids[2], ids[0]]
 let bytes = try JSONEncoder().encode(state)
@@ -112,3 +114,4 @@ func verifyStartupPreflight() throws {
 }
 try verifyStartupPreflight()
 print("Startup checks passed: fresh and known layouts open; incompatible and malformed layouts preserve files.")
+

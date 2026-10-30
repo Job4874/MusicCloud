@@ -12,6 +12,14 @@ workflows:
         script: bash iphone/check-models.sh
       - name: Check lossless legacy export adapter
         script: bash iphone/Migration/run-checks.sh
+      - name: Check production library migration
+        script: bash iphone/Migration/ProductionTests/run-checks.sh
+      - name: Check saved artwork
+        script: bash iphone/ArtworkTests/run-checks.sh
+      - name: Check Wi-Fi upload boundaries
+        script: bash iphone/WiFiUploadTests/run-checks.sh
+      - name: Check playback queue recovery
+        script: bash iphone/check-queue.sh
       - name: Compile native app and package unsigned IPA
         script: |
           set -euo pipefail

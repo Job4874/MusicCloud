@@ -15,6 +15,11 @@
         A10000000000000000000007 /* PlayerViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* PlayerViews.swift */; };
         A10000000000000000000008 /* TransferView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* TransferView.swift */; };
         A10000000000000000000009 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* Assets.xcassets */; };
+        A1000000000000000000000A /* LegacyExportAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* LegacyExportAdapter.swift */; };
+        A1000000000000000000000B /* LegacyLibraryMigration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* LegacyLibraryMigration.swift */; };
+        A1000000000000000000000C /* LibraryArtworkStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* LibraryArtworkStore.swift */; };
+        A1000000000000000000000D /* WiFiUploadServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000F /* WiFiUploadServer.swift */; };
+        A1000000000000000000000E /* PlaybackQueueState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000010 /* PlaybackQueueState.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -29,6 +34,11 @@
         A20000000000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
         A2000000000000000000000A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
         A2000000000000000000000B /* MusicCloud.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MusicCloud.app; sourceTree = BUILT_PRODUCTS_DIR; };
+        A2000000000000000000000C /* LegacyExportAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LegacyExportAdapter.swift; sourceTree = "<group>"; };
+        A2000000000000000000000D /* LegacyLibraryMigration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LegacyLibraryMigration.swift; sourceTree = "<group>"; };
+        A2000000000000000000000E /* LibraryArtworkStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryArtworkStore.swift; sourceTree = "<group>"; };
+        A2000000000000000000000F /* WiFiUploadServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WiFiUploadServer.swift; sourceTree = "<group>"; };
+        A20000000000000000000010 /* PlaybackQueueState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackQueueState.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -52,6 +62,11 @@
                 A20000000000000000000006 /* PlaylistViews.swift */,
                 A20000000000000000000007 /* PlayerViews.swift */,
                 A20000000000000000000008 /* TransferView.swift */,
+                A2000000000000000000000C /* LegacyExportAdapter.swift */,
+                A2000000000000000000000D /* LegacyLibraryMigration.swift */,
+                A2000000000000000000000E /* LibraryArtworkStore.swift */,
+                A2000000000000000000000F /* WiFiUploadServer.swift */,
+                A20000000000000000000010 /* PlaybackQueueState.swift */,
                 A2000000000000000000000A /* Assets.xcassets */,
                 A20000000000000000000009 /* Info.plist */,
             );
@@ -114,6 +129,11 @@
                 A10000000000000000000006 /* PlaylistViews.swift in Sources */,
                 A10000000000000000000007 /* PlayerViews.swift in Sources */,
                 A10000000000000000000008 /* TransferView.swift in Sources */,
+                A1000000000000000000000A /* LegacyExportAdapter.swift in Sources */,
+                A1000000000000000000000B /* LegacyLibraryMigration.swift in Sources */,
+                A1000000000000000000000C /* LibraryArtworkStore.swift in Sources */,
+                A1000000000000000000000D /* WiFiUploadServer.swift in Sources */,
+                A1000000000000000000000E /* PlaybackQueueState.swift in Sources */,
             );
             runOnlyForDeploymentPostprocessing = 0;
         };
@@ -167,13 +187,13 @@
             buildSettings = {
                 ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
                 CODE_SIGN_STYLE = Automatic;
-                CURRENT_PROJECT_VERSION = 1;
+                CURRENT_PROJECT_VERSION = 7;
                 DEVELOPMENT_TEAM = "";
                 GENERATE_INFOPLIST_FILE = NO;
                 INFOPLIST_FILE = MusicCloud/Info.plist;
                 IPHONEOS_DEPLOYMENT_TARGET = 16.0;
                 LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
-                MARKETING_VERSION = 1.0;
+                MARKETING_VERSION = 1.6;
                 PRODUCT_BUNDLE_IDENTIFIER = com.personal.musiccloud;
                 PRODUCT_NAME = "$(TARGET_NAME)";
                 SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -189,13 +209,13 @@
             buildSettings = {
                 ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
                 CODE_SIGN_STYLE = Automatic;
-                CURRENT_PROJECT_VERSION = 1;
+                CURRENT_PROJECT_VERSION = 7;
                 DEVELOPMENT_TEAM = "";
                 GENERATE_INFOPLIST_FILE = NO;
                 INFOPLIST_FILE = MusicCloud/Info.plist;
                 IPHONEOS_DEPLOYMENT_TARGET = 16.0;
                 LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
-                MARKETING_VERSION = 1.0;
+                MARKETING_VERSION = 1.6;
                 PRODUCT_BUNDLE_IDENTIFIER = com.personal.musiccloud;
                 PRODUCT_NAME = "$(TARGET_NAME)";
                 SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -215,3 +235,4 @@
     };
     rootObject = A90000000000000000000001 /* Project object */;
 }
+

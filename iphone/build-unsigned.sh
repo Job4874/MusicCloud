@@ -34,3 +34,4 @@ ditto "$app" "$package_dir/Payload/MusicCloud.app"
 ditto -c -k --keepParent "$package_dir/Payload" "$build_dir/MusicCloud-unsigned.ipa"
 echo "Unsigned package: $build_dir/MusicCloud-unsigned.ipa"
 echo "This IPA must be signed for your iPhone before it can run."
+

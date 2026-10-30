@@ -87,3 +87,4 @@ let unicodeResolution = try unicodeInventory.resolve(decomposed)
 precondition(unicodeResolution == .missing(decomposed))
 
 print("Legacy adapter checks passed: original bytes, rich/unknown fields, entry ordering/duplicates, statuses, exact safe path resolution.")
+

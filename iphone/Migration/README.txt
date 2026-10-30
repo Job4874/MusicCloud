@@ -1,5 +1,5 @@
-Read-only migration groundwork; not connected to app startup or restore.
+The legacy export adapter is compiled into the iPhone app from MusicCloud/LegacyExportAdapter.swift.
 
-The original export bytes are retained unchanged. Ordered projections keep missing/unavailable entries, source metadata and unknown JSON fields. Exact relative paths are checked against an inventory; filenames are never guessed.
+Migration/ProductionTests exercises the production read-only startup migration: original export and sidecar bytes are archived, rich entries including missing/unavailable songs and duplicates are retained, current favorites/order are applied, and the app commits to a separate v3 state file. Original Documents data is not rewritten by migration.
 
-Run bash iphone/Migration/run-checks.sh to compile and execute synthetic checks on macOS. These checks do not validate a current phone library, implement a migration, or authorize replacing the installed app.
+The standalone adapter checks here test rich/unknown JSON fields and exact path projection. Run bash iphone/Migration/run-checks.sh and bash iphone/Migration/ProductionTests/run-checks.sh on macOS. Fixtures are synthetic. A successful test run is not a real-device signing, playback or Wi-Fi test.

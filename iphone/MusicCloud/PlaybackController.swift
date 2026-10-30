@@ -18,6 +18,7 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
 
     private var player: AVAudioPlayer?
     private var originalOrder: [Track] = []
+    private var queueState = PlaybackQueueState()
     private var timer: Timer?
     private let isEnabled: Bool
     private let documentsURL: URL
@@ -68,23 +69,25 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
     }
 
     func play(_ track: Track, from tracks: [Track]) {
-        guard isEnabled, !tracks.isEmpty else { return }
-        pendingCheckpoint = nil
-        originalOrder = tracks
-        if isShuffled {
-            queue = [track] + tracks.filter { $0.id != track.id }.shuffled()
-            currentIndex = 0
-        } else {
-            queue = tracks
-            currentIndex = tracks.firstIndex(where: { $0.id == track.id }) ?? 0
+        guard let index = tracks.firstIndex(where: { $0.id == track.id }) else {
+            play(at: 0, from: [track])
+            return
         }
+        play(at: index, from: tracks)
+    }
+
+    func play(at index: Int, from tracks: [Track]) {
+        guard isEnabled, tracks.indices.contains(index) else { return }
+        pendingCheckpoint = nil
+        queueState.start(trackIDs: tracks.map(\.id), at: index, shuffled: isShuffled)
+        applyQueueState(refreshing: tracks)
         loadCurrentTrack(autoplay: true)
     }
 
     func playAll(_ tracks: [Track], shuffled: Bool = false) {
-        guard let first = shuffled ? tracks.randomElement() : tracks.first else { return }
+        guard isEnabled, !tracks.isEmpty else { return }
         isShuffled = shuffled
-        play(first, from: tracks)
+        play(at: shuffled ? Int.random(in: tracks.indices) : 0, from: tracks)
     }
 
     func togglePlayback() { isPlaying ? pause() : resume() }
@@ -131,6 +134,7 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
         queue = []
         originalOrder = []
         currentIndex = nil
+        queueState = PlaybackQueueState()
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         // An explicit stop clears the resume point; it never deletes music or playlists.
@@ -155,8 +159,8 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
     func previous() {
         guard let currentIndex else { return }
         if elapsed > 3 { seek(to: 0); return }
-        if currentIndex > 0 { self.currentIndex = currentIndex - 1 }
-        else if repeatMode == .all, !queue.isEmpty { self.currentIndex = queue.count - 1 }
+        if currentIndex > 0 { selectIndex(currentIndex - 1) }
+        else if repeatMode == .all, !queue.isEmpty { selectIndex(queue.count - 1) }
         else { seek(to: 0); return }
         loadCurrentTrack(autoplay: true)
     }
@@ -169,10 +173,10 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
             seek(to: 0)
             resume()
         } else if currentIndex + 1 < queue.count {
-            self.currentIndex = currentIndex + 1
+            selectIndex(currentIndex + 1)
             loadCurrentTrack(autoplay: true)
         } else if repeatMode == .all && !queue.isEmpty {
-            self.currentIndex = 0
+            selectIndex(0)
             loadCurrentTrack(autoplay: true)
         } else {
             player?.pause()
@@ -184,59 +188,47 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
     }
 
     func toggleShuffle() {
-        let currentID = currentTrack?.id
+        guard isEnabled else { return }
         isShuffled.toggle()
-        guard let currentID else { return }
-        if isShuffled {
-            let selected = queue.filter { $0.id == currentID }
-            queue = selected + queue.filter { $0.id != currentID }.shuffled()
-            currentIndex = 0
-        } else {
-            queue = originalOrder
-            currentIndex = queue.firstIndex { $0.id == currentID }
-        }
+        queueState.setShuffled(isShuffled)
+        applyQueueState()
         saveCheckpoint()
     }
 
     func jump(to index: Int) {
-        guard queue.indices.contains(index) else { return }
-        currentIndex = index
+        guard isEnabled, queue.indices.contains(index) else { return }
+        selectIndex(index)
         loadCurrentTrack(autoplay: true)
     }
 
     func playNext(_ track: Track) {
-        guard let currentIndex else { play(track, from: [track]); return }
-        // Each track appears once in the queue. Moving a current track is a no-op.
-        guard currentTrack?.id != track.id else { return }
-        let currentID = currentTrack?.id
-        queue.removeAll { $0.id == track.id }
-        let newIndex = queue.firstIndex { $0.id == currentID } ?? currentIndex
-        self.currentIndex = newIndex
-        queue.insert(track, at: min(newIndex + 1, queue.count))
-        originalOrder.removeAll { $0.id == track.id }
-        if let originalCurrent = originalOrder.firstIndex(where: { $0.id == currentID }) {
-            originalOrder.insert(track, at: min(originalCurrent + 1, originalOrder.count))
-        } else { originalOrder.append(track) }
+        guard isEnabled else { return }
+        guard currentIndex != nil else { play(track, from: [track]); return }
+        queueState.insertNext(trackID: track.id)
+        applyQueueState(refreshing: [track])
+        saveCheckpoint()
+    }
+
+    func removeFromQueue(at index: Int) {
+        guard isEnabled, queueState.remove(at: index) else { return }
+        applyQueueState()
         saveCheckpoint()
     }
 
     func removeFromQueue(id: String) {
+        guard isEnabled else { return }
         guard currentTrack?.id != id else { return }
-        let currentID = currentTrack?.id
-        queue.removeAll { $0.id == id }
-        originalOrder.removeAll { $0.id == id }
-        currentIndex = queue.firstIndex { $0.id == currentID }
+        queueState.removeNonplayingPath(id)
+        applyQueueState()
         saveCheckpoint()
     }
 
     // Keep the playing file until explicit deletion, but remove missing upcoming
     // files and refresh metadata after USB transfers or a rescan.
     func reconcile(with tracks: [Track]) {
-        let available = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
-        let current = currentTrack
-        queue = queue.compactMap { available[$0.id] ?? ($0.id == current?.id ? $0 : nil) }
-        originalOrder = originalOrder.compactMap { available[$0.id] ?? ($0.id == current?.id ? $0 : nil) }
-        currentIndex = queue.firstIndex { $0.id == current?.id }
+        guard isEnabled else { return }
+        queueState.reconcile(availablePaths: Set(tracks.map(\.id)))
+        applyQueueState(refreshing: tracks)
         refreshNowPlaying()
         saveCheckpoint()
     }
@@ -246,7 +238,27 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
         else { removeFromQueue(id: track.id) }
     }
 
+    private func selectIndex(_ index: Int) {
+        queueState.currentIndex = index
+        currentIndex = index
+    }
+
+    private func applyQueueState(refreshing tracks: [Track] = []) {
+        var byPath: [String: Track] = [:]
+        for track in queue + originalOrder + tracks { byPath[track.id] = track }
+        let nextQueue = queueState.queue.compactMap { byPath[$0.trackID] }
+        let nextOriginal = queueState.original.compactMap { byPath[$0.trackID] }
+        guard nextQueue.count == queueState.queue.count, nextOriginal.count == queueState.original.count else {
+            errorMessage = "The queue could not be updated because a music file was not found."
+            return
+        }
+        queue = nextQueue
+        originalOrder = nextOriginal
+        currentIndex = queueState.currentIndex
+    }
+
     private func loadCurrentTrack(autoplay: Bool, position: TimeInterval = 0) {
+        guard isEnabled else { return }
         player?.stop()
         player = nil
         isPlaying = false
@@ -402,7 +414,11 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
     // artwork. Wait for a successful library scan and restore paused: launching
     // the app must not unexpectedly begin playing through the speaker.
     func restoreIfNeeded(with tracks: [Track]) {
-        guard let saved = pendingCheckpoint else { return }
+        guard isEnabled, let saved = pendingCheckpoint else { return }
+        guard let restoredOrder = try? saved.validatedQueueState() else {
+            errorMessage = "The saved queue could not be opened safely. Start a new queue to continue."
+            return
+        }
         let available = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
         guard saved.queueIDs.allSatisfy({ available[$0] != nil }),
               saved.originalIDs.allSatisfy({ available[$0] != nil }) else {
@@ -410,9 +426,8 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
             return
         }
         restoringCheckpoint = true
-        queue = saved.queueIDs.compactMap { available[$0] }
-        originalOrder = saved.originalIDs.compactMap { available[$0] }
-        currentIndex = saved.currentIndex
+        queueState = restoredOrder
+        applyQueueState(refreshing: tracks)
         isShuffled = saved.shuffled
         repeatMode = RepeatMode(rawValue: saved.repeatMode) ?? .off
         duration = currentTrack?.duration ?? 0
@@ -429,15 +444,18 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
               let currentIndex, queue.indices.contains(currentIndex) else { return }
         let position = player?.currentTime ?? elapsed
         guard position.isFinite else { return }
-        let saved = PlaybackCheckpoint(version: 1, queueIDs: queue.map(\.id),
+        let saved = PlaybackCheckpoint(version: 2, queueIDs: queue.map(\.id),
             originalIDs: originalOrder.map(\.id), currentIndex: currentIndex,
-            position: max(0, position), shuffled: isShuffled, repeatMode: repeatMode.rawValue)
+            position: max(0, position), shuffled: isShuffled, repeatMode: repeatMode.rawValue,
+            queueTokens: queueState.queue.map(\.token), originalTokens: queueState.original.map(\.token))
         do {
-            guard saved.queueIDs.count <= 50000, saved.originalIDs.count <= 50000 else {
+            guard saved.queueIDs.count <= PlaybackCheckpoint.maximumOccurrences,
+                saved.originalIDs.count <= PlaybackCheckpoint.maximumOccurrences else {
                 throw PlaybackError.queueTooLarge
             }
+            _ = try saved.validatedQueueState()
             let data = try JSONEncoder().encode(saved)
-            guard data.count <= 4 * 1024 * 1024 else { throw PlaybackError.queueTooLarge }
+            guard data.count <= PlaybackCheckpoint.maximumBytes else { throw PlaybackError.queueTooLarge }
             try FileManager.default.createDirectory(at: checkpointURL.deletingLastPathComponent(),
                 withIntermediateDirectories: true)
             try data.write(to: checkpointURL, options: .atomic)
@@ -452,15 +470,15 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
     }
 
     private static func readCheckpoint(from url: URL) -> PlaybackCheckpoint? {
-        guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-              size <= 4 * 1024 * 1024,
-              let data = try? Data(contentsOf: url),
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey]),
+              values.isRegularFile == true, values.isSymbolicLink != true,
+              let size = values.fileSize, size <= PlaybackCheckpoint.maximumBytes,
+              let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: PlaybackCheckpoint.maximumBytes + 1),
+              data.count <= PlaybackCheckpoint.maximumBytes,
               let saved = try? JSONDecoder().decode(PlaybackCheckpoint.self, from: data),
-              saved.version == 1, !saved.queueIDs.isEmpty,
-              saved.queueIDs.count <= 50000, saved.originalIDs.count <= 50000,
-              saved.queueIDs.indices.contains(saved.currentIndex),
-              saved.originalIDs.contains(saved.queueIDs[saved.currentIndex]),
-              saved.position.isFinite, saved.position >= 0,
+              (try? saved.validatedQueueState()) != nil,
               RepeatMode(rawValue: saved.repeatMode) != nil else { return nil }
         return saved
     }
@@ -481,16 +499,6 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
     }
 }
 
-private struct PlaybackCheckpoint: Codable {
-    let version: Int
-    let queueIDs: [String]
-    let originalIDs: [String]
-    let currentIndex: Int
-    let position: TimeInterval
-    let shuffled: Bool
-    let repeatMode: String
-}
-
 private enum PlaybackError: LocalizedError {
     case couldNotPlay, invalidPath, decodeFailed, queueTooLarge
     var errorDescription: String? {
@@ -502,4 +510,5 @@ private enum PlaybackError: LocalizedError {
         }
     }
 }
+
 

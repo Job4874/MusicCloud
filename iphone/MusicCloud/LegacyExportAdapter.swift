@@ -89,7 +89,7 @@ private func optionalBool(_ object: [String: JSONValue], _ key: String) throws -
     return result
 }
 
-struct LegacyRelativePath: Hashable {
+struct LegacyRelativePath: Hashable, Sendable {
     let rawValue: String
 
     init(_ rawValue: String) throws {

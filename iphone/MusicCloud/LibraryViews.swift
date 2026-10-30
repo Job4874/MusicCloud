@@ -219,12 +219,16 @@ struct TrackRow: View {
     @EnvironmentObject private var playback: PlaybackController
     let track: Track
     let context: [Track]
+    var playbackIndex: Int? = nil
     @State private var confirmDelete = false
     @State private var showEdit = false
 
     var body: some View {
         HStack(spacing: 12) {
-            Button { playback.play(track, from: context) } label: {
+            Button {
+                if let playbackIndex { playback.play(at: playbackIndex, from: context) }
+                else { playback.play(track, from: context) }
+            } label: {
                 HStack(spacing: 12) {
                     ArtworkView(data: track.artwork, size: 46)
                     VStack(alignment: .leading, spacing: 4) {
@@ -272,7 +276,7 @@ struct TrackRow: View {
                 library.deleteFile(track)
             }
         } message: {
-            Text("This removes the audio file, its favorite, and its playlist entries from this iPhone. Keep a backup on your computer.")
+            Text("This removes the audio file and its favorite. Playlist entries stay visible as missing files. Keep a backup on your computer.")
         }
     }
 }
@@ -372,4 +376,5 @@ private struct EmptyLibraryView: View {
         }.frame(maxWidth: .infinity).padding(.vertical, 32)
     }
 }
+
 
