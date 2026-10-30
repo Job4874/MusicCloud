@@ -12,6 +12,7 @@ final class LibraryStore: ObservableObject {
     @Published var message: String?
     @Published private(set) var lastScan: Date?
     @Published private(set) var lastScanSucceeded = false
+    @Published private(set) var isLibraryProtected = false
 
     nonisolated static let extensions: Set<String> = ["mp3", "m4a", "aac", "wav", "aif", "aiff", "flac", "caf"]
     let documentsURL: URL
@@ -32,18 +33,37 @@ final class LibraryStore: ObservableObject {
             try fm.createDirectory(at: documentsURL, withIntermediateDirectories: true)
             try fm.createDirectory(at: support, withIntermediateDirectories: true)
             if fm.fileExists(atPath: stateURL.path) {
-                let decoded = try JSONDecoder().decode(LibraryState.self, from: Data(contentsOf: stateURL))
+                let data = try Data(contentsOf: stateURL)
+                try LibrarySchemaGuard.validate(data)
+                let decoded = try JSONDecoder().decode(LibraryState.self, from: data)
                 guard (decoded.version == 1 && decoded.trackOverrides == nil) ||
                     (decoded.version == 2 && decoded.trackOverrides != nil) else {
                     throw StoreError.unsupportedVersion
                 }
                 state = decoded
             }
-        } catch {
-            // A damaged or newer state file must not be overwritten with defaults.
+        } catch LibrarySchemaError.newerLibrary {
+            isLibraryProtected = true
             canSave = false
-            message = "Saved playlists could not be opened. Your music is safe. Use Transfer → Restore playlist backup to recover your saved lists. Existing saved data has been preserved. \(error.localizedDescription)"
+            message = "This library contains data from a newer MusicCloud version. It has not been changed. Use the matching newer app or restore from a verified backup after migration."
+        } catch StoreError.unsupportedVersion {
+            isLibraryProtected = true
+            canSave = false
+            message = "This library uses an unsupported MusicCloud version. It has not been changed. Use the matching newer app or restore from a verified backup after migration."
+        } catch {
+            // Unreadable state must not be replaced by defaults or a restore.
+            isLibraryProtected = true
+            canSave = false
+            message = "The saved library could not be opened safely. No library changes were made. Preserve the existing data for recovery. \(error.localizedDescription)"
         }
+    }
+
+    func requireWritableLibrary() -> Bool {
+        guard canSave else {
+            message = "The saved library could not be opened safely. No changes were made."
+            return false
+        }
+        return true
     }
 
     var favorites: [Track] { tracks.filter { state.favoriteIDs.contains($0.id) } }
@@ -105,7 +125,8 @@ final class LibraryStore: ObservableObject {
 
     @discardableResult
     func editMetadata(id: String, title: String, artist: String, album: String) -> Bool {
-        guard canSave, scannedTracks.contains(where: { $0.id == id }) else {
+        guard requireWritableLibrary() else { return false }
+        guard scannedTracks.contains(where: { $0.id == id }) else {
             message = "Changes could not be saved. Check the library state and try again."
             return false
         }
@@ -126,7 +147,7 @@ final class LibraryStore: ObservableObject {
 
     @discardableResult
     func resetMetadata(id: String) -> Bool {
-        guard canSave else { message = "Changes cannot be saved until the library state is restored."; return false }
+        guard requireWritableLibrary() else { return false }
         let previous = state
         var edits = state.trackOverrides ?? [:]
         edits.removeValue(forKey: id)
@@ -152,6 +173,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func toggleFavorite(_ track: Track) {
+        guard requireWritableLibrary() else { return }
         if state.favoriteIDs.contains(track.id) { state.favoriteIDs.remove(track.id) }
         else { state.favoriteIDs.insert(track.id) }
         save()
@@ -159,6 +181,7 @@ final class LibraryStore: ObservableObject {
 
     @discardableResult
     func createPlaylist(name: String) -> UUID? {
+        guard requireWritableLibrary() else { return nil }
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return nil }
         let playlist = Playlist(name: name)
@@ -168,6 +191,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func renamePlaylist(id: UUID, name: String) {
+        guard requireWritableLibrary() else { return }
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, let index = state.playlists.firstIndex(where: { $0.id == id }) else { return }
         state.playlists[index].name = name
@@ -175,11 +199,13 @@ final class LibraryStore: ObservableObject {
     }
 
     func deletePlaylist(id: UUID) {
+        guard requireWritableLibrary() else { return }
         state.playlists.removeAll { $0.id == id }
         save()
     }
 
     func add(_ track: Track, to playlistID: UUID) {
+        guard requireWritableLibrary() else { return }
         guard let index = state.playlists.firstIndex(where: { $0.id == playlistID }) else { return }
         guard !state.playlists[index].trackIDs.contains(track.id) else { return }
         state.playlists[index].trackIDs.append(track.id)
@@ -187,18 +213,21 @@ final class LibraryStore: ObservableObject {
     }
 
     func removeTracks(at offsets: IndexSet, from playlistID: UUID) {
+        guard requireWritableLibrary() else { return }
         guard let index = state.playlists.firstIndex(where: { $0.id == playlistID }) else { return }
         state.playlists[index].trackIDs.remove(atOffsets: offsets)
         save()
     }
 
     func removeTrack(id: String, from playlistID: UUID) {
+        guard requireWritableLibrary() else { return }
         guard let index = state.playlists.firstIndex(where: { $0.id == playlistID }) else { return }
         state.playlists[index].trackIDs.removeAll { $0 == id }
         save()
     }
 
     func moveTracks(from source: IndexSet, to destination: Int, in playlistID: UUID) {
+        guard requireWritableLibrary() else { return }
         guard let index = state.playlists.firstIndex(where: { $0.id == playlistID }) else { return }
         state.playlists[index].trackIDs.move(fromOffsets: source, toOffset: destination)
         save()
@@ -206,6 +235,7 @@ final class LibraryStore: ObservableObject {
 
     // Called only after a destructive confirmation in the UI.
     func deleteFile(_ track: Track) {
+        guard requireWritableLibrary() else { return }
         guard let url = safeURL(for: track.id) else { return }
         do {
             try FileManager.default.removeItem(at: url)
@@ -224,6 +254,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func importFiles(_ urls: [URL]) {
+        guard requireWritableLibrary() else { return }
         guard !isImporting else {
             message = "An import is already in progress. Wait for it to finish, then try again."
             return
@@ -285,6 +316,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func makeBackup() throws -> Data {
+        guard canSave else { throw StoreError.newerLibrary }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(state)
@@ -318,7 +350,10 @@ final class LibraryStore: ObservableObject {
     // A JSON backup contains playlist/favorite references, never audio files.
     // It is only applied after a separate replacement confirmation in the UI.
     func restoreBackup(_ data: Data) throws {
+        // A recovery restore must not replace state from a newer app silently.
+        guard !isLibraryProtected else { throw StoreError.newerLibrary }
         guard data.count <= 10 * 1024 * 1024 else { throw StoreError.invalidBackup }
+        try LibrarySchemaGuard.validate(data)
         var decoded = try JSONDecoder().decode(LibraryState.self, from: data)
         guard decoded.version == 1 || (decoded.version == 2 && decoded.trackOverrides != nil) else {
             throw StoreError.unsupportedVersion
@@ -466,7 +501,7 @@ final class LibraryStore: ObservableObject {
 }
 
 private enum StoreError: LocalizedError {
-    case notRegularFile, unsupportedVersion, invalidBackup, cannotPreserveEdits, libraryTooLarge
+    case notRegularFile, unsupportedVersion, invalidBackup, cannotPreserveEdits, libraryTooLarge, newerLibrary
     var errorDescription: String? {
         switch self {
         case .notRegularFile: return "The selected item is not a regular audio file."
@@ -474,6 +509,7 @@ private enum StoreError: LocalizedError {
         case .invalidBackup: return "This is not a valid MusicCloud playlist backup, or it exceeds 10 MB."
         case .libraryTooLarge: return "The library backup would exceed 10 MB. No replacement was saved."
         case .cannotPreserveEdits: return "The existing library state could not be read, so song edits cannot be preserved from this older backup. No data was changed. Preserve the existing library data before recovery."
+        case .newerLibrary: return "This library or backup cannot be safely opened by this build. No data was changed."
         }
     }
 }

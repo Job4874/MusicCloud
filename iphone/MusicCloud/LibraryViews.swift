@@ -9,6 +9,15 @@ struct RootView: View {
     @State private var showNowPlaying = false
 
     var body: some View {
+        Group {
+        if library.isLibraryProtected {
+            VStack(spacing: 16) {
+                Image(systemName: "lock.shield").font(.largeTitle)
+                Text("MusicCloud cannot safely open this library").font(.title2.bold())
+                Text("This build cannot safely use or change the saved library. No library changes were made. Preserve the existing data and use the matching app or a verified migration.")
+                    .multilineTextAlignment(.center)
+            }.padding(24)
+        } else {
         TabView {
             NavigationStack { LibraryView() }
                 .tabItem { Label("Library", systemImage: "square.stack") }
@@ -44,6 +53,8 @@ struct RootView: View {
                 playback.restoreIfNeeded(with: library.tracks)
                 playback.reconcile(with: library.tracks)
             }
+        }
+        }
         }
     }
 }
@@ -256,6 +267,7 @@ struct TrackRow: View {
         .sheet(isPresented: $showEdit) { EditSongDetailsView(track: track) }
         .confirmationDialog("Delete \(track.title)?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete file from iPhone", role: .destructive) {
+                guard library.requireWritableLibrary() else { return }
                 playback.prepareForDeletion(track)
                 library.deleteFile(track)
             }
