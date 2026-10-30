@@ -10,6 +10,8 @@ workflows:
     scripts:
       - name: Check original model behavior
         script: bash iphone/check-models.sh
+      - name: Check lossless legacy export adapter
+        script: bash iphone/Migration/run-checks.sh
       - name: Compile native app and package unsigned IPA
         script: |
           set -euo pipefail
