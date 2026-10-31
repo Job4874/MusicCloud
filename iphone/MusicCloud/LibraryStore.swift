@@ -47,21 +47,26 @@ final class LibraryStore: ObservableObject {
             let previous = try LibraryStateReader.read(documentsURL: documentsURL, stateURL: stateURL,
                 allowLegacyMigration: true, legacyStateURL: support.appendingPathComponent("library-state.json"))
             let loaded = LikedCollection.merging(previous)
-            // Validate and bound the complete projection plus its source archive
-            // before creating a new state file. Existing source files stay intact.
-            let encoded = try Self.encodedState(loaded)
+            let nativeStateExists = fm.fileExists(atPath: stateURL.path)
+            let needsStateWrite = !nativeStateExists || previous.playlists != loaded.playlists
+            // The reader already strictly validated an unchanged native state.
+            // Re-encoding/re-validating its immutable archive on every launch
+            // delays the first frame without making an unchanged file safer.
+            let encoded: Data?
+            if needsStateWrite { encoded = try Self.encodedState(loaded) }
+            else { encoded = nil }
             let details = try LegacyLibraryMigration.displayMetadata(in: loaded.legacyArchive)
             try fm.createDirectory(at: documentsURL, withIntermediateDirectories: true)
             try fm.createDirectory(at: support, withIntermediateDirectories: true)
-            if previous.playlists != loaded.playlists, fm.fileExists(atPath: stateURL.path) {
-                let backup = support.appendingPathComponent("library-state-before-liked-merge.json")
-                if !fm.fileExists(atPath: backup.path) {
-                    let original = try LegacyLibraryMigration.readBoundedFile(stateURL,
-                        maximumBytes: LibraryStateReader.maximumStateBytes)
-                    try original.write(to: backup, options: .atomic)
+            if let encoded {
+                if nativeStateExists {
+                    let backup = support.appendingPathComponent("library-state-before-liked-merge.json")
+                    if !fm.fileExists(atPath: backup.path) {
+                        let original = try LegacyLibraryMigration.readBoundedFile(stateURL,
+                            maximumBytes: LibraryStateReader.maximumStateBytes)
+                        try original.write(to: backup, options: .atomic)
+                    }
                 }
-                try encoded.write(to: stateURL, options: .atomic)
-            } else if !fm.fileExists(atPath: stateURL.path) {
                 try encoded.write(to: stateURL, options: .atomic)
             }
             state = loaded
@@ -168,6 +173,7 @@ final class LibraryStore: ObservableObject {
         let root = documentsURL
         let cacheURL = catalogURL
         let cache = Dictionary(uniqueKeysWithValues: scannedTracks.map { ($0.id, $0) })
+        let allowCachedPreview = scannedTracks.isEmpty && tracks.isEmpty && lastScan == nil
         let exportData = state.legacyArchive?.originalExportData
         let playlistIDs = state.playlists.map(\.id)
         let playlistEntries = state.playlists.flatMap { $0.entries ?? [] }
@@ -181,12 +187,14 @@ final class LibraryStore: ObservableObject {
         }
         let extraArtwork = supplementalArtwork
         scanTask = Task {
-            let worker = Task.detached(priority: .userInitiated) {
+            let worker = Task.detached(priority: .userInitiated) { [weak self] in
                 var cached = cache
+                var loadedPersistedCache = false
                 if cached.isEmpty,
                     let data = try? LegacyLibraryMigration.readBoundedFile(cacheURL, maximumBytes: 8 * 1024 * 1024),
                     let records = try? JSONDecoder().decode([TrackCatalogRecord].self, from: data), records.count <= 50_000 {
                     for record in records { if let track = record.track { cached[track.id] = track } }
+                    loadedPersistedCache = !cached.isEmpty
                 }
                 var artworkWarning: String?
                 let artwork: LibraryArtworkStore?
@@ -196,6 +204,40 @@ final class LibraryStore: ObservableObject {
                     artwork = nil
                     artworkWarning = "Some saved artwork could not be opened. The original artwork files have been preserved."
                 }
+                let playlistImages = Dictionary(uniqueKeysWithValues: playlistIDs.compactMap { id in
+                    artwork?.artwork(for: id).map { (id, $0) }
+                })
+                func unavailableImages(available: Set<String>) -> [UUID: Data] {
+                    var images: [UUID: Data] = [:]
+                    for entry in playlistEntries where entry.trackID.map({ !available.contains($0) }) ?? true {
+                        var reference: String?
+                        if case .object(let raw)? = entry.legacyData, case .string(let path)? = raw["artwork"] { reference = path }
+                        if reference == nil, let video = entry.sourceVideoID,
+                            video.range(of: "^[A-Za-z0-9_-]{11}$", options: .regularExpression) != nil {
+                            reference = "Artwork/\(video).jpg"
+                        }
+                        if let reference, let image = artwork?.art(reference: reference) { images[entry.id] = image }
+                    }
+                    return images
+                }
+                if allowCachedPreview, loadedPersistedCache, let artwork, !Task.isCancelled {
+                    let preview = cached.values.map { track in
+                        Track(id: track.id, title: track.title, artist: track.artist, album: track.album,
+                            duration: track.duration, artwork: artwork.artwork(for: track.id) ?? track.artwork,
+                            byteCount: track.byteCount, modifiedAt: track.modifiedAt)
+                    }
+                    let previewUnavailable = unavailableImages(available: Set(preview.map(\.id)))
+                    await MainActor.run { [weak self] in
+                        guard let self, !Task.isCancelled, self.scanGeneration == generation,
+                            self.canSave, !self.isLibraryProtected, self.scannedTracks.isEmpty else { return }
+                        self.scannedTracks = preview
+                        self.playlistArtwork = playlistImages
+                        self.unavailableArtwork = previewUnavailable
+                        // This is a disposable display preview. Only a completed
+                        // filesystem scan may mark success and restore a queue.
+                        self.applyMetadataOverrides()
+                    }
+                }
                 let scan = await Self.scan(root: root, cache: cached, artworkStore: artwork)
                 if scan.error == nil, !Task.isCancelled,
                     let data = try? JSONEncoder().encode(scan.tracks.map {
@@ -204,22 +246,9 @@ final class LibraryStore: ObservableObject {
                     try? FileManager.default.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
                     try? data.write(to: cacheURL, options: .atomic)
                 }
-                let playlistImages = Dictionary(uniqueKeysWithValues: playlistIDs.compactMap { id in
-                    artwork?.artwork(for: id).map { (id, $0) }
-                })
                 let available = Set(scan.tracks.map(\.id))
-                var unavailableImages: [UUID: Data] = [:]
-                for entry in playlistEntries where entry.trackID.map({ !available.contains($0) }) ?? true {
-                    var reference: String?
-                    if case .object(let raw)? = entry.legacyData, case .string(let path)? = raw["artwork"] { reference = path }
-                    if reference == nil, let video = entry.sourceVideoID,
-                        video.range(of: "^[A-Za-z0-9_-]{11}$", options: .regularExpression) != nil {
-                        reference = "Artwork/\(video).jpg"
-                    }
-                    if let reference, let image = artwork?.art(reference: reference) { unavailableImages[entry.id] = image }
-                }
                 return (tracks: scan.tracks, error: scan.error, artworkWarning: artworkWarning,
-                    playlistImages: playlistImages, unavailableImages: unavailableImages)
+                    playlistImages: playlistImages, unavailableImages: unavailableImages(available: available))
             }
             let result = await withTaskCancellationHandler(operation: {
                 await worker.value

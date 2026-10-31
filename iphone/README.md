@@ -1,6 +1,6 @@
 # MusicCloud for iPhone
 
-**Version 1.8 · Build 9 · iOS 16 or later.** A native SwiftUI player for audio stored on your iPhone. Playback works offline after copying files. The source contains no music, private library fixtures, accounts, advertisements or analytics. Wi-Fi upload starts a temporary local server only when requested.
+**Version 1.8 · Build 10 · iOS 16 or later.** A native SwiftUI player for audio stored on your iPhone. Playback works offline after copying files. The source contains no music, private library fixtures, accounts, advertisements or analytics. Wi-Fi upload starts a temporary local server only when requested.
 
 The build produces an **unsigned IPA**, which requires device signing and installation. The preceding version 1.7/build 8 was signed and installed over USB on an existing installation, retaining its effective bundle identifier, signing team and library data. Signing credentials and personal device evidence stay outside this repository.
 
@@ -65,6 +65,7 @@ bash iphone/ArtworkTests/run-checks.sh
 bash iphone/WiFiUploadTests/run-checks.sh
 bash iphone/check-queue.sh
 bash iphone/check-playback-performance.sh
+bash iphone/check-library-persistence.sh
 bash iphone/build-unsigned.sh
 ```
 

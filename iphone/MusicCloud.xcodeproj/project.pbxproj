@@ -187,7 +187,7 @@
             buildSettings = {
                 ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
                 CODE_SIGN_STYLE = Automatic;
-                CURRENT_PROJECT_VERSION = 9;
+                CURRENT_PROJECT_VERSION = 10;
                 DEVELOPMENT_TEAM = "";
                 GENERATE_INFOPLIST_FILE = NO;
                 INFOPLIST_FILE = MusicCloud/Info.plist;
@@ -209,7 +209,7 @@
             buildSettings = {
                 ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
                 CODE_SIGN_STYLE = Automatic;
-                CURRENT_PROJECT_VERSION = 9;
+                CURRENT_PROJECT_VERSION = 10;
                 DEVELOPMENT_TEAM = "";
                 GENERATE_INFOPLIST_FILE = NO;
                 INFOPLIST_FILE = MusicCloud/Info.plist;
