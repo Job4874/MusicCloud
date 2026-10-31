@@ -115,3 +115,41 @@ func verifyStartupPreflight() throws {
 try verifyStartupPreflight()
 print("Startup checks passed: fresh and known layouts open; incompatible and malformed layouts preserve files.")
 
+
+// The same likes importer and heart model must converge on one collection.
+func verifyLikedMerge() throws {
+    let retained = PlaylistEntry(trackID: "Music/old.m4a", title: "Old", artist: "A", status: "downloaded", sourceVideoID: "old-video")
+    let missing = PlaylistEntry(trackID: nil, title: "Later", artist: "B", status: "unavailable", sourceVideoID: "new-video")
+    let old = Playlist(name: "Liked Music", trackIDs: ["Music/old.m4a"], entries: [retained, missing])
+    let repaired = PlaylistEntry(trackID: "Music/later.m4a", title: "Later", artist: "B", status: "downloaded", sourceVideoID: "new-video")
+    let added = PlaylistEntry(trackID: "Music/added.m4a", title: "Added", artist: "C", status: "downloaded", sourceVideoID: "added-video")
+    let imported = Playlist(name: "YouTube Liked Music (3 of 3 identified)", trackIDs: ["Music/old.m4a", "Music/later.m4a", "Music/added.m4a"], entries: [retained, repaired, added].enumerated().map { _, e in
+        var copy = e; copy.id = UUID(); return copy
+    })
+    let ordinary = Playlist(name: "Night drive", trackIDs: ["Music/old.m4a", "Music/old.m4a"])
+    var input = LibraryState()
+    input.playlists = [old, ordinary, imported]
+    input.favoriteIDs = ["Music/favorite.m4a"]
+    let merged = LikedCollection.merging(input)
+    precondition(merged.playlists.count == 2 && merged.playlists[1] == ordinary)
+    let liked = merged.playlists[0]
+    precondition(liked.id == old.id && liked.name == "Liked Songs")
+    precondition(liked.entries?.count == 4)
+    precondition(liked.entries?[0].id == retained.id && liked.entries?[1].id == missing.id)
+    precondition(liked.entries?[1].trackID == "Music/later.m4a")
+    precondition(liked.trackIDs == ["Music/old.m4a", "Music/later.m4a", "Music/added.m4a", "Music/favorite.m4a"])
+    precondition(merged.favoriteIDs == input.favoriteIDs)
+    precondition(LikedCollection.merging(merged).playlists == merged.playlists, "Migration must be idempotent.")
+    precondition(!LikedCollection.recognizes("Songs I liked on a trip"))
+    try LibrarySchemaGuard.validateState(merged)
+}
+try verifyLikedMerge()
+print("Liked collection checks passed: one identity, repaired entries, union without duplicate paths, existing favorites, unchanged ordinary duplicates, idempotent migration.")
+
+var pathOnly = LibraryState()
+let nativeLike = PlaylistEntry(trackID: "Music/shared.m4a", title: "", artist: "", status: "downloaded")
+let namedLike = PlaylistEntry(trackID: "Music/shared.m4a", title: "Shared", artist: "Artist", status: "downloaded", sourceVideoID: "public-id")
+pathOnly.playlists = [Playlist(name: "Liked Music", trackIDs: ["Music/shared.m4a"], entries: [nativeLike]), Playlist(name: "YouTube Liked Music (1 of 1 identified)", trackIDs: ["Music/shared.m4a"], entries: [namedLike])]
+let enrichedLike = LikedCollection.merging(pathOnly).playlists[0].entries![0]
+precondition(enrichedLike.id == nativeLike.id && enrichedLike.sourceVideoID == "public-id" && enrichedLike.title == "Shared")
+print("Liked merge retains newly supplied source IDs and artwork lookup metadata for path-only entries.")

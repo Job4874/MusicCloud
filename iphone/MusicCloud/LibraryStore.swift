@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import OSLog
 import SwiftUI
 import UIKit
 
@@ -9,21 +10,31 @@ final class LibraryStore: ObservableObject {
     @Published private(set) var state = LibraryState()
     @Published private(set) var isScanning = false
     @Published private(set) var isImporting = false
+    @Published private(set) var isSaving = false
     @Published var message: String?
     @Published private(set) var lastScan: Date?
     @Published private(set) var lastScanSucceeded = false
     @Published private(set) var isLibraryProtected = false
+    @Published private(set) var catalogRevision = 0
+    @Published private(set) var tracksRevision = 0
 
     nonisolated static let extensions: Set<String> = ["mp3", "m4a", "aac", "wav", "aif", "aiff", "flac", "caf"]
     let documentsURL: URL
     private let stateURL: URL
+    private let catalogURL: URL
     private var canSave = true
     private var scanTask: Task<Void, Never>?
     private var scanGeneration = UUID()
     // Keep file metadata separate from display edits so a reset reveals the original tags.
     private var scannedTracks: [Track] = []
     @Published private var playlistArtwork: [UUID: Data] = [:]
+    private var unavailableArtwork: [UUID: Data] = [:]
     private var importedDetails: [LegacyRelativePath: LegacyTrackDisplay] = [:]
+    private var tracksByID: [String: Track] = [:]
+    private var tracksByPlaylist: [UUID: [Track]] = [:]
+    private var cachedTotalSize = "0 KB"
+    private var persistence: NativeLibraryPersistence?
+    private var saveRevision: UInt64 = 0
 
     init() {
         let fm = FileManager.default
@@ -31,20 +42,37 @@ final class LibraryStore: ObservableObject {
         let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("MusicCloud", isDirectory: true)
         stateURL = support.appendingPathComponent("library-state-v3.json")
+        catalogURL = fm.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("MusicCloud", isDirectory: true).appendingPathComponent("catalog-v1.json")
         do {
-            let loaded = try LibraryStateReader.read(documentsURL: documentsURL, stateURL: stateURL,
+            let previous = try LibraryStateReader.read(documentsURL: documentsURL, stateURL: stateURL,
                 allowLegacyMigration: true, legacyStateURL: support.appendingPathComponent("library-state.json"))
-            // Validate and bound the complete projection plus its source archive
-            // before creating a new state file. Existing source files stay intact.
-            let encoded = try Self.encodedState(loaded)
+            let loaded = LikedCollection.merging(previous)
+            let nativeStateExists = fm.fileExists(atPath: stateURL.path)
+            let needsStateWrite = !nativeStateExists || previous.playlists != loaded.playlists
+            // The reader already strictly validated an unchanged native state.
+            // Re-encoding/re-validating its immutable archive on every launch
+            // delays the first frame without making an unchanged file safer.
+            let encoded: Data?
+            if needsStateWrite { encoded = try Self.encodedState(loaded) }
+            else { encoded = nil }
             let details = try LegacyLibraryMigration.displayMetadata(in: loaded.legacyArchive)
             try fm.createDirectory(at: documentsURL, withIntermediateDirectories: true)
             try fm.createDirectory(at: support, withIntermediateDirectories: true)
-            if !fm.fileExists(atPath: stateURL.path) {
+            if let encoded {
+                if nativeStateExists {
+                    let backup = support.appendingPathComponent("library-state-before-liked-merge.json")
+                    if !fm.fileExists(atPath: backup.path) {
+                        let original = try LegacyLibraryMigration.readBoundedFile(stateURL,
+                            maximumBytes: LibraryStateReader.maximumStateBytes)
+                        try original.write(to: backup, options: .atomic)
+                    }
+                }
                 try encoded.write(to: stateURL, options: .atomic)
             }
             state = loaded
             importedDetails = details
+            persistence = NativeLibraryPersistence(url: stateURL, durableState: loaded)
         } catch LibrarySchemaError.incompatibleLayout {
             isLibraryProtected = true
             canSave = false
@@ -73,12 +101,17 @@ final class LibraryStore: ObservableObject {
         return true
     }
 
-    var favorites: [Track] { tracks.filter { state.favoriteIDs.contains($0.id) } }
-    var totalSize: String {
-        ByteCountFormatter.string(fromByteCount: tracks.reduce(0) { $0 + $1.byteCount }, countStyle: .file)
+    var likedPlaylistID: UUID? { LikedCollection.playlistID(in: state) }
+    var visiblePlaylists: [Playlist] { state.playlists.filter { $0.id != likedPlaylistID } }
+    var likedTracks: [Track] { likedPlaylistID.flatMap { tracksByPlaylist[$0] } ?? [] }
+    var favorites: [Track] { likedTracks }
+    var totalSize: String { cachedTotalSize }
+    func isLiked(_ track: Track) -> Bool {
+        state.favoriteIDs.contains(track.id) || likedTrackIDs.contains(track.id)
     }
+    private var likedTrackIDs = Set<String>()
 
-    func track(id: String) -> Track? { tracks.first { $0.id == id } }
+    func track(id: String) -> Track? { tracksByID[id] }
     func track(for entry: PlaylistEntry) -> Track? {
         guard let id = entry.trackID, let original = track(id: id) else { return nil }
         return applyingEntryDetails(entry, to: original)
@@ -94,20 +127,17 @@ final class LibraryStore: ObservableObject {
     }
     func playlist(id: UUID) -> Playlist? { state.playlists.first { $0.id == id } }
     func playlistTracks(_ playlist: Playlist) -> [Track] {
-        let byID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
-        if let entries = playlist.entries {
-            return entries.compactMap { entry in
-                guard let id = entry.trackID, let track = byID[id] else { return nil }
-                return applyingEntryDetails(entry, to: track)
-            }
-        }
-        return playlist.trackIDs.compactMap { byID[$0] }
+        tracksByPlaylist[playlist.id] ?? []
     }
 
     func playlistEntryCount(_ playlist: Playlist) -> Int { playlist.entries?.count ?? playlist.trackIDs.count }
 
     func artwork(for playlist: Playlist) -> Data? {
-        playlistArtwork[playlist.id] ?? playlistTracks(playlist).first?.artwork
+        playlistArtwork[playlist.id] ?? playlistTracks(playlist).lazy.compactMap(\.artwork).first
+    }
+
+    func artwork(for entry: PlaylistEntry) -> Data? {
+        entry.trackID.flatMap { tracksByID[$0]?.artwork } ?? unavailableArtwork[entry.id]
     }
 
     // Promote a legacy native playlist only when an explicit edit needs entries.
@@ -142,23 +172,84 @@ final class LibraryStore: ObservableObject {
         isScanning = true
         lastScanSucceeded = false
         let root = documentsURL
+        let cacheURL = catalogURL
         let cache = Dictionary(uniqueKeysWithValues: scannedTracks.map { ($0.id, $0) })
+        let allowCachedPreview = scannedTracks.isEmpty && tracks.isEmpty && lastScan == nil
         let exportData = state.legacyArchive?.originalExportData
         let playlistIDs = state.playlists.map(\.id)
+        let playlistEntries = state.playlists.flatMap { $0.entries ?? [] }
+        var supplementalArtwork: [String: String] = [:]
+        for playlist in state.playlists {
+            for entry in playlist.entries ?? [] {
+                guard let path = entry.trackID, let video = entry.sourceVideoID,
+                    video.range(of: "^[A-Za-z0-9_-]{11}$", options: .regularExpression) != nil else { continue }
+                supplementalArtwork[path] = "Artwork/\(video).jpg"
+            }
+        }
+        let extraArtwork = supplementalArtwork
         scanTask = Task {
-            let worker = Task.detached(priority: .userInitiated) {
+            let worker = Task.detached(priority: .userInitiated) { [weak self] in
+                var cached = cache
+                var loadedPersistedCache = false
+                if cached.isEmpty,
+                    let data = try? LegacyLibraryMigration.readBoundedFile(cacheURL, maximumBytes: 8 * 1024 * 1024),
+                    let records = try? JSONDecoder().decode([TrackCatalogRecord].self, from: data), records.count <= 50_000 {
+                    for record in records { if let track = record.track { cached[track.id] = track } }
+                    loadedPersistedCache = !cached.isEmpty
+                }
                 var artworkWarning: String?
                 let artwork: LibraryArtworkStore?
-                do { artwork = try LibraryArtworkStore(documentsURL: root, legacyExportData: exportData) }
+                do { artwork = try LibraryArtworkStore(documentsURL: root, legacyExportData: exportData,
+                    supplemental: extraArtwork) }
                 catch {
                     artwork = nil
                     artworkWarning = "Some saved artwork could not be opened. The original artwork files have been preserved."
                 }
-                let scan = await Self.scan(root: root, cache: cache, artworkStore: artwork)
                 let playlistImages = Dictionary(uniqueKeysWithValues: playlistIDs.compactMap { id in
                     artwork?.artwork(for: id).map { (id, $0) }
                 })
-                return (tracks: scan.tracks, error: scan.error, artworkWarning: artworkWarning, playlistImages: playlistImages)
+                func unavailableImages(available: Set<String>) -> [UUID: Data] {
+                    var images: [UUID: Data] = [:]
+                    for entry in playlistEntries where entry.trackID.map({ !available.contains($0) }) ?? true {
+                        var reference: String?
+                        if case .object(let raw)? = entry.legacyData, case .string(let path)? = raw["artwork"] { reference = path }
+                        if reference == nil, let video = entry.sourceVideoID,
+                            video.range(of: "^[A-Za-z0-9_-]{11}$", options: .regularExpression) != nil {
+                            reference = "Artwork/\(video).jpg"
+                        }
+                        if let reference, let image = artwork?.art(reference: reference) { images[entry.id] = image }
+                    }
+                    return images
+                }
+                if allowCachedPreview, loadedPersistedCache, let artwork, !Task.isCancelled {
+                    let preview = cached.values.map { track in
+                        Track(id: track.id, title: track.title, artist: track.artist, album: track.album,
+                            duration: track.duration, artwork: artwork.artwork(for: track.id) ?? track.artwork,
+                            byteCount: track.byteCount, modifiedAt: track.modifiedAt)
+                    }
+                    let previewUnavailable = unavailableImages(available: Set(preview.map(\.id)))
+                    await MainActor.run { [weak self] in
+                        guard let self, !Task.isCancelled, self.scanGeneration == generation,
+                            self.canSave, !self.isLibraryProtected, self.scannedTracks.isEmpty else { return }
+                        self.scannedTracks = preview
+                        self.playlistArtwork = playlistImages
+                        self.unavailableArtwork = previewUnavailable
+                        // This is a disposable display preview. Only a completed
+                        // filesystem scan may mark success and restore a queue.
+                        self.applyMetadataOverrides()
+                    }
+                }
+                let scan = await Self.scan(root: root, cache: cached, artworkStore: artwork)
+                if scan.error == nil, !Task.isCancelled,
+                    let data = try? JSONEncoder().encode(scan.tracks.map {
+                        TrackCatalogRecord($0, embeddedArtwork: artwork?.artwork(for: $0.id) == nil ? $0.artwork : nil)
+                    }), data.count <= 8 * 1024 * 1024 {
+                    try? FileManager.default.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try? data.write(to: cacheURL, options: .atomic)
+                }
+                let available = Set(scan.tracks.map(\.id))
+                return (tracks: scan.tracks, error: scan.error, artworkWarning: artworkWarning,
+                    playlistImages: playlistImages, unavailableImages: unavailableImages(available: available))
             }
             let result = await withTaskCancellationHandler(operation: {
                 await worker.value
@@ -167,6 +258,7 @@ final class LibraryStore: ObservableObject {
             lastScanSucceeded = result.error == nil
             scannedTracks = result.tracks
             playlistArtwork = result.playlistImages
+            unavailableArtwork = result.unavailableImages
             applyMetadataOverrides()
             isScanning = false
             lastScan = Date()
@@ -186,6 +278,25 @@ final class LibraryStore: ObservableObject {
             let lhs = $0.title.musicSortKey, rhs = $1.title.musicSortKey
             return lhs == rhs ? $0.id < $1.id : lhs < rhs
         }
+        rebuildIndexes()
+        tracksRevision &+= 1
+    }
+
+    private func rebuildIndexes() {
+        tracksByID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
+        cachedTotalSize = ByteCountFormatter.string(fromByteCount: tracks.reduce(0) { $0 + $1.byteCount }, countStyle: .file)
+        var lists: [UUID: [Track]] = [:]
+        for playlist in state.playlists {
+            if let entries = playlist.entries {
+                lists[playlist.id] = entries.compactMap { entry in
+                    guard let id = entry.trackID, let original = tracksByID[id] else { return nil }
+                    return applyingEntryDetails(entry, to: original)
+                }
+            } else { lists[playlist.id] = playlist.trackIDs.compactMap { tracksByID[$0] } }
+        }
+        tracksByPlaylist = lists
+        likedTrackIDs = Set(state.playlists.first { $0.id == likedPlaylistID }?.trackIDs ?? [])
+        catalogRevision &+= 1
     }
 
     @discardableResult
@@ -204,14 +315,8 @@ final class LibraryStore: ObservableObject {
         edits[id] = TrackMetadataOverride(title: values[0], artist: values[1], album: values[2])
         var candidate = state
         candidate.trackOverrides = edits
-        for index in candidate.playlists.indices {
-            guard var entries = candidate.playlists[index].entries else { continue }
-            for entryIndex in entries.indices where entries[entryIndex].trackID == id {
-                entries[entryIndex].title = values[0]
-                entries[entryIndex].artist = values[1]
-            }
-            setEntries(entries, at: index, in: &candidate)
-        }
+        // A path override changes display only. Keep each playlist occurrence's
+        // saved source text, so Reset does not flatten distinct imported titles.
         guard commit(candidate) else { return false }
         applyMetadataOverrides()
         return true
@@ -221,16 +326,27 @@ final class LibraryStore: ObservableObject {
     func resetMetadata(id: String) -> Bool {
         guard requireWritableLibrary() else { return false }
         var edits = state.trackOverrides ?? [:]
-        edits.removeValue(forKey: id)
+        let previousEdit = edits.removeValue(forKey: id)
         var candidate = state
         candidate.trackOverrides = edits
-        if let original = scannedTracks.first(where: { $0.id == id }) {
+        if let previousEdit, let original = scannedTracks.first(where: { $0.id == id }) {
             let detail = (try? LegacyRelativePath(id)).flatMap { importedDetails[$0] }
             for index in candidate.playlists.indices {
                 guard var entries = candidate.playlists[index].entries else { continue }
                 for entryIndex in entries.indices where entries[entryIndex].trackID == id {
-                    entries[entryIndex].title = detail?.title ?? original.title
-                    entries[entryIndex].artist = detail?.artist ?? original.artist
+                    // Older builds copied the override into entries too.
+                    // Recover only those matching copies from their retained
+                    // source object; leave already preserved occurrence text.
+                    guard entries[entryIndex].title == previousEdit.title,
+                        entries[entryIndex].artist == previousEdit.artist else { continue }
+                    var sourceTitle: String?
+                    var sourceArtist: String?
+                    if case .object(let raw)? = entries[entryIndex].legacyData {
+                        if case .string(let value)? = raw["title"] { sourceTitle = value }
+                        if case .string(let value)? = raw["artist"] { sourceArtist = value }
+                    }
+                    entries[entryIndex].title = sourceTitle ?? detail?.title ?? original.title
+                    entries[entryIndex].artist = sourceArtist ?? detail?.artist ?? original.artist
                 }
                 setEntries(entries, at: index, in: &candidate)
             }
@@ -241,10 +357,26 @@ final class LibraryStore: ObservableObject {
     }
 
     func toggleFavorite(_ track: Track) {
+        toggleLike(track)
+    }
+
+    func toggleLike(_ track: Track) {
         guard requireWritableLibrary() else { return }
         var candidate = state
-        if candidate.favoriteIDs.contains(track.id) { candidate.favoriteIDs.remove(track.id) }
-        else { candidate.favoriteIDs.insert(track.id) }
+        if isLiked(track) {
+            candidate.favoriteIDs.remove(track.id)
+            if let index = candidate.playlists.firstIndex(where: { $0.id == likedPlaylistID }) {
+                let entries = editableEntries(for: candidate.playlists[index]).filter { $0.trackID != track.id }
+                setEntries(entries, at: index, in: &candidate)
+            }
+        } else {
+            candidate.favoriteIDs.insert(track.id)
+            if let index = candidate.playlists.firstIndex(where: { $0.id == likedPlaylistID }) {
+                var entries = editableEntries(for: candidate.playlists[index])
+                entries.insert(PlaylistEntry(trackID: track.id, title: track.title, artist: track.artist, status: "downloaded"), at: 0)
+                setEntries(entries, at: index, in: &candidate)
+            }
+        }
         commit(candidate)
     }
 
@@ -253,6 +385,7 @@ final class LibraryStore: ObservableObject {
         guard requireWritableLibrary() else { return nil }
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, name.count <= 500 else { return nil }
+        if LikedCollection.recognizes(name) { return likedPlaylistID }
         let playlist = Playlist(name: name, entries: [])
         var candidate = state
         candidate.playlists.append(playlist)
@@ -262,6 +395,7 @@ final class LibraryStore: ObservableObject {
 
     func renamePlaylist(id: UUID, name: String) {
         guard requireWritableLibrary() else { return }
+        guard id != likedPlaylistID, !LikedCollection.recognizes(name) else { return }
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, name.count <= 500, let index = state.playlists.firstIndex(where: { $0.id == id }) else { return }
         var candidate = state
@@ -271,6 +405,7 @@ final class LibraryStore: ObservableObject {
 
     func deletePlaylist(id: UUID) {
         guard requireWritableLibrary() else { return }
+        guard id != likedPlaylistID else { return }
         var candidate = state
         candidate.playlists.removeAll { $0.id == id }
         commit(candidate)
@@ -293,6 +428,9 @@ final class LibraryStore: ObservableObject {
         var candidate = state
         var entries = editableEntries(for: candidate.playlists[index])
         guard offsets.allSatisfy({ entries.indices.contains($0) }) else { return }
+        if playlistID == likedPlaylistID {
+            for offset in offsets { if let path = entries[offset].trackID { candidate.favoriteIDs.remove(path) } }
+        }
         entries.remove(atOffsets: offsets)
         setEntries(entries, at: index, in: &candidate)
         commit(candidate)
@@ -303,6 +441,7 @@ final class LibraryStore: ObservableObject {
         guard let index = state.playlists.firstIndex(where: { $0.id == playlistID }) else { return }
         var candidate = state
         var entries = editableEntries(for: candidate.playlists[index])
+        if playlistID == likedPlaylistID { candidate.favoriteIDs.remove(id) }
         entries.removeAll { $0.trackID == id }
         setEntries(entries, at: index, in: &candidate)
         commit(candidate)
@@ -335,15 +474,16 @@ final class LibraryStore: ObservableObject {
         }
         // Persist the retained references first. A failed state write must never
         // be followed by deleting the audio file.
-        guard commit(candidate) else { return }
+        guard commit(candidate, durably: true) else { return }
         do {
             try FileManager.default.removeItem(at: url)
             tracks.removeAll { $0.id == track.id }
             scannedTracks.removeAll { $0.id == track.id }
+            rebuildIndexes()
             rescan()
         } catch {
             let deletionError = error.localizedDescription
-            let rolledBack = commit(previous)
+            let rolledBack = commit(previous, durably: true)
             message = "Could not delete \(track.filename): \(deletionError)"
                 + (rolledBack ? "" : " The saved entries were retained as missing; the audio file is still present.")
         }
@@ -459,12 +599,14 @@ final class LibraryStore: ObservableObject {
         if decoded.legacyArchive == nil { decoded.legacyArchive = state.legacyArchive }
         decoded.version = 3
         decoded.trackOverrides = decoded.trackOverrides ?? [:]
+        decoded = LikedCollection.merging(decoded)
         // Complete the atomic write first, preserving current in-memory state
         // if the device has no free space or cannot write the replacement.
-        let mergedData = try Self.encodedState(decoded)
+        _ = try Self.encodedState(decoded)
         let details = try LegacyLibraryMigration.displayMetadata(in: decoded.legacyArchive)
-        try mergedData.write(to: stateURL, options: .atomic)
-        state = decoded
+        guard commit(decoded, durably: true, allowArchiveReplacement: true) else {
+            throw StoreError.persistenceFailure(message ?? "The restored library could not be saved.")
+        }
         importedDetails = details
         applyMetadataOverrides()
         canSave = true
@@ -483,24 +625,48 @@ final class LibraryStore: ObservableObject {
     }
 
     @discardableResult
-    private func commit(_ proposed: LibraryState) -> Bool {
-        guard canSave else {
+    private func commit(_ proposed: LibraryState, durably: Bool = false,
+        allowArchiveReplacement: Bool = false) -> Bool {
+        guard canSave, let persistence else {
             message = "Changes cannot be saved because the saved library state could not be read. Existing saved data has been preserved."
             return false
         }
-        do {
-            var candidate = proposed
-            candidate.version = 3
-            candidate.trackOverrides = candidate.trackOverrides ?? [:]
-            let data = try Self.encodedState(candidate)
-            try data.write(to: stateURL, options: .atomic)
-            // Publish only after the complete file write has succeeded.
+        var candidate = proposed
+        candidate.version = 3
+        candidate.trackOverrides = candidate.trackOverrides ?? [:]
+        if durably {
+            let outcome = persistence.saveDurably(candidate, allowArchiveReplacement: allowArchiveReplacement)
+            saveRevision = outcome.revision
+            isSaving = false
+            if let error = outcome.errorDescription {
+                state = outcome.durableState
+                applyMetadataOverrides()
+                message = "Could not save library changes. Unsaved changes were reverted to the last saved library. \(error)"
+                return false
+            }
             state = candidate
+            rebuildIndexes()
             return true
-        } catch {
-            message = "Could not save library changes. Your previous saved state is unchanged. \(error.localizedDescription)"
-            return false
         }
+        let background = LibrarySaveBackgroundTask()
+        // Snapshot before publishing. Nested arrays/dictionaries use value
+        // semantics, so subsequent taps cannot mutate the worker's snapshot.
+        saveRevision = persistence.save(candidate) { [weak self] outcome in
+            Task { @MainActor [weak self] in
+                background.end()
+                guard let self, self.saveRevision == outcome.revision else { return }
+                self.isSaving = false
+                if let error = outcome.errorDescription {
+                    self.state = outcome.durableState
+                    self.applyMetadataOverrides()
+                    self.message = "Could not save library changes. Unsaved changes were reverted to the last saved library. \(error)"
+                }
+            }
+        }
+        isSaving = true
+        state = candidate
+        rebuildIndexes()
+        return true
     }
 
     nonisolated private static func uniqueDestination(for filename: String, in directory: URL) -> URL {
@@ -524,7 +690,8 @@ final class LibraryStore: ObservableObject {
                 return true
             }) else { return ([], "Could not open the music folder.") }
         var result: [Track] = []
-        for case let url as URL in enumerator {
+        while let item = enumerator.nextObject() {
+            guard let url = item as? URL else { continue }
             if Task.isCancelled { break }
             let values: URLResourceValues
             do {
@@ -592,8 +759,30 @@ final class LibraryStore: ObservableObject {
     }
 }
 
+@MainActor
+private final class LibrarySaveBackgroundTask {
+    private static let log = Logger(subsystem: "MusicCloud", category: "LibraryPersistence")
+    private var identifier: UIBackgroundTaskIdentifier = .invalid
+    init() {
+        identifier = UIApplication.shared.beginBackgroundTask(withName: "Save music library") { [weak self] in
+            MainActor.assumeIsolated {
+                Self.log.info("library background assertion expiry")
+                self?.end()
+            }
+        }
+        Self.log.info("library background assertion start id=\(self.identifier.rawValue, privacy: .public)")
+    }
+    func end() {
+        guard identifier != .invalid else { return }
+        Self.log.info("library background assertion end id=\(self.identifier.rawValue, privacy: .public)")
+        UIApplication.shared.endBackgroundTask(identifier)
+        identifier = .invalid
+    }
+}
+
 private enum StoreError: LocalizedError {
     case notRegularFile, unsupportedVersion, invalidBackup, cannotPreserveEdits, libraryTooLarge, newerLibrary
+    case persistenceFailure(String)
     var errorDescription: String? {
         switch self {
         case .notRegularFile: return "The selected item is not a regular audio file."
@@ -602,9 +791,9 @@ private enum StoreError: LocalizedError {
         case .libraryTooLarge: return "The library exceeds the supported backup size. No replacement was saved."
         case .cannotPreserveEdits: return "The existing library state could not be read, so song edits cannot be preserved from this older backup. No data was changed. Preserve the existing library data before recovery."
         case .newerLibrary: return "This library or backup cannot be safely opened by this build. No data was changed."
+        case .persistenceFailure(let description): return description
         }
     }
 }
-
 
 

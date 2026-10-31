@@ -20,6 +20,10 @@ workflows:
         script: bash iphone/WiFiUploadTests/run-checks.sh
       - name: Check playback queue recovery
         script: bash iphone/check-queue.sh
+      - name: Check playback intent and ordered background checkpoint IO
+        script: bash iphone/check-playback-performance.sh
+      - name: Check optimistic library persistence and durable barriers
+        script: bash iphone/check-library-persistence.sh
       - name: Compile native app and package unsigned IPA
         script: |
           set -euo pipefail
