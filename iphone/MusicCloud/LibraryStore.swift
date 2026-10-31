@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import OSLog
 import SwiftUI
 import UIKit
 
@@ -760,14 +761,20 @@ final class LibraryStore: ObservableObject {
 
 @MainActor
 private final class LibrarySaveBackgroundTask {
+    private static let log = Logger(subsystem: "MusicCloud", category: "LibraryPersistence")
     private var identifier: UIBackgroundTaskIdentifier = .invalid
     init() {
         identifier = UIApplication.shared.beginBackgroundTask(withName: "Save music library") { [weak self] in
-            Task { @MainActor [weak self] in self?.end() }
+            MainActor.assumeIsolated {
+                Self.log.info("library background assertion expiry")
+                self?.end()
+            }
         }
+        Self.log.info("library background assertion start id=\(self.identifier.rawValue, privacy: .public)")
     }
     func end() {
         guard identifier != .invalid else { return }
+        Self.log.info("library background assertion end id=\(self.identifier.rawValue, privacy: .public)")
         UIApplication.shared.endBackgroundTask(identifier)
         identifier = .invalid
     }

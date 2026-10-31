@@ -20,10 +20,10 @@ struct MiniPlayer: View {
                 }.buttonStyle(.plain).accessibilityLabel("Now playing: \(track.title), \(track.artist)")
                 Button { playback.togglePlayback() } label: {
                     ZStack {
-                        Image(systemName: playback.isPlaying || playback.isLoading ? "pause.fill" : "play.fill").font(.system(size: 20, weight: .semibold))
+                        Image(systemName: playback.showsPauseControl ? "pause.fill" : "play.fill").font(.system(size: 20, weight: .semibold))
                         if playback.isLoading { ProgressView().scaleEffect(0.65).offset(x: 12, y: -13) }
                     }.foregroundStyle(.white).frame(width: 42, height: 48)
-                }.buttonStyle(.plain).accessibilityLabel(playback.isLoading ? "Cancel playback preparation" : (playback.isPlaying ? "Pause" : "Play"))
+                }.buttonStyle(.plain).accessibilityLabel(playback.showsPauseControl ? "Pause" : "Play")
                 Button { playback.next() } label: {
                     Image(systemName: "forward.end.fill").font(.system(size: 17)).foregroundStyle(.white).frame(width: 36, height: 48)
                 }.buttonStyle(.plain).accessibilityLabel("Next song")
@@ -158,10 +158,10 @@ private struct PlayerTransportControls: View {
             Button { playback.togglePlayback() } label: {
                 ZStack {
                     Circle().fill(Theme.accent)
-                    Image(systemName: playback.isPlaying || playback.isLoading ? "pause.fill" : "play.fill").font(.system(size: 29, weight: .semibold)).foregroundStyle(Theme.ink)
+                    Image(systemName: playback.showsPauseControl ? "pause.fill" : "play.fill").font(.system(size: 29, weight: .semibold)).foregroundStyle(Theme.ink)
                     if playback.isLoading { ProgressView().tint(Theme.ink).scaleEffect(0.7).offset(x: 21, y: -21) }
                 }.frame(width: 76, height: 76)
-            }.buttonStyle(.plain).accessibilityLabel(playback.isLoading ? "Cancel playback preparation" : (playback.isPlaying ? "Pause" : "Play"))
+            }.buttonStyle(.plain).accessibilityLabel(playback.showsPauseControl ? "Pause" : "Play")
             Spacer(minLength: 0)
             Button { playback.next() } label: { Image(systemName: "forward.end.fill").font(.system(size: 27)).foregroundStyle(.white).frame(width: 48, height: 60) }
                 .buttonStyle(.plain).accessibilityLabel("Next song")

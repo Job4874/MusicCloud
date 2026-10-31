@@ -203,6 +203,10 @@ struct PlaybackIntentState: Equatable {
 
     var canStartPlayback: Bool { wantsPlayback && !isInterrupted }
 
+    func shouldPauseForToggle(isPlaying: Bool, isLoading: Bool) -> Bool {
+        isPlaying || (isLoading && canStartPlayback)
+    }
+
     mutating func requestPlay() {
         wantsPlayback = true
         if isInterrupted { resumeAfterInterruption = true }
@@ -211,6 +215,20 @@ struct PlaybackIntentState: Equatable {
     mutating func requestPause() {
         wantsPlayback = false
         resumeAfterInterruption = false
+    }
+
+    // Only an explicit Play action may ask the OS to recover a missing end
+    // notification. Automatic callbacks never use this bypass.
+    mutating func explicitActivationSucceeded() {
+        wantsPlayback = true
+        isInterrupted = false
+        resumeAfterInterruption = false
+    }
+
+    mutating func explicitActivationFailed() {
+        // Do not let a delayed file-open or end notification start playback
+        // after the OS refused this request. Another explicit Play can retry.
+        requestPause()
     }
 
     mutating func interruptionBegan() {

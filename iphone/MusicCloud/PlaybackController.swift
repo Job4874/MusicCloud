@@ -2,7 +2,10 @@ import AVFoundation
 import Combine
 import ImageIO
 import MediaPlayer
+import OSLog
 import UIKit
+
+private let playbackLog = Logger(subsystem: "MusicCloud", category: "Playback")
 
 // Only scrubber/time views observe this object. A clock tick must not rebuild
 // the library, playlist rows, artwork and queue controls several times a second.
@@ -107,7 +110,10 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
             })
         notificationObservers.append(NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.saveCheckpoint(keepAlive: true) }
+                Task { @MainActor [weak self] in
+                    self?.logPlaybackState("did-enter-background")
+                    self?.saveCheckpoint(keepAlive: true)
+                }
             })
         let clock = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.tick() }
@@ -136,7 +142,7 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
         sourcePlaylistID = context.playlistID
         queueState.start(trackIDs: tracks.map(\.id), at: index, shuffled: isShuffled)
         applyQueueState(refreshing: tracks)
-        loadCurrentTrack(autoplay: true)
+        loadCurrentTrack(autoplay: true, explicitRequest: true)
     }
 
     func playAll(_ tracks: [Track], shuffled: Bool = false, contextName: String? = nil, playlistID: UUID? = nil) {
@@ -146,11 +152,25 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
             contextName: contextName, playlistID: playlistID)
     }
 
-    func togglePlayback() { (isPlaying || intent.wantsPlayback) ? pause() : resume() }
+    var showsPauseControl: Bool { intent.shouldPauseForToggle(isPlaying: isPlaying, isLoading: isLoading) }
+
+    func togglePlayback() { showsPauseControl ? pause() : resume() }
 
     func resume() {
         guard isEnabled, currentTrack != nil else { return }
+        if isPlaying, player?.isPlaying == true { return }
         intent.requestPlay()
+        logPlaybackState("explicit-play-request")
+        // A begin notification is not guaranteed a matching end. Explicit
+        // user/remote Play asks the OS instead of trusting a stale local gate.
+        do {
+            try activateSession(explicitRequest: true)
+            intent.explicitActivationSucceeded()
+            errorMessage = nil
+        } catch {
+            reportSessionActivationFailure(error)
+            return
+        }
         startPlaybackIfAllowed()
     }
 
@@ -161,11 +181,13 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
             loadCurrentTrack(autoplay: true, position: position)
             return
         }
+        do { try activateSession() }
+        catch { reportSessionActivationFailure(error); return }
         do {
-            try activateSession()
             if elapsed >= duration, duration > 0 { player?.currentTime = 0; elapsed = 0 }
             guard player?.play() == true else { throw PlaybackError.couldNotPlay }
             isPlaying = true
+            logPlaybackState("play-started")
             refreshNowPlaying()
             saveCheckpoint()
         } catch { report(error) }
@@ -174,6 +196,7 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
     func pause() {
         intent.requestPause()
         pausePlayer()
+        logPlaybackState("user-paused")
     }
 
     private func pausePlayer() {
@@ -241,7 +264,7 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
         if currentIndex > 0 { selectIndex(currentIndex - 1) }
         else if repeatMode == .all, !queue.isEmpty { selectIndex(queue.count - 1) }
         else { seek(to: 0); return }
-        loadCurrentTrack(autoplay: true)
+        loadCurrentTrack(autoplay: true, explicitRequest: true)
     }
 
     func next() { advance(automatically: false) }
@@ -250,13 +273,13 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
         guard let currentIndex else { return }
         if automatically && repeatMode == .one {
             seek(to: 0)
-            resume()
+            startPlaybackIfAllowed()
         } else if currentIndex + 1 < queue.count {
             selectIndex(currentIndex + 1)
-            loadCurrentTrack(autoplay: true)
+            loadCurrentTrack(autoplay: true, explicitRequest: !automatically)
         } else if repeatMode == .all && !queue.isEmpty {
             selectIndex(0)
-            loadCurrentTrack(autoplay: true)
+            loadCurrentTrack(autoplay: true, explicitRequest: !automatically)
         } else {
             intent.requestPause()
             player?.pause()
@@ -278,7 +301,7 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
     func jump(to index: Int) {
         guard isEnabled, queue.indices.contains(index) else { return }
         selectIndex(index)
-        loadCurrentTrack(autoplay: true)
+        loadCurrentTrack(autoplay: true, explicitRequest: true)
     }
 
     func playNext(_ track: Track) {
@@ -345,7 +368,7 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
         checkpointOriginalTokens = queueState.original.map(\.token)
     }
 
-    private func loadCurrentTrack(autoplay: Bool, position: TimeInterval = 0) {
+    private func loadCurrentTrack(autoplay: Bool, position: TimeInterval = 0, explicitRequest: Bool = false) {
         guard isEnabled else { return }
         if autoplay { intent.requestPlay() } else { intent.requestPause() }
         let revision = preparationRevision.advance()
@@ -360,6 +383,16 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
             isLoading = false
             report(PlaybackError.invalidPath)
             return
+        }
+        if explicitRequest, autoplay, intent.isInterrupted {
+            // Resolve a stale gate during the user action, never later in the
+            // asynchronous load callback. A new interruption arriving while
+            // opening the file therefore still prevents automatic playback.
+            do {
+                try activateSession(explicitRequest: true)
+                intent.explicitActivationSucceeded()
+                errorMessage = nil
+            } catch { reportSessionActivationFailure(error) }
         }
         let root = documentsURL
         let path = track.id
@@ -403,17 +436,39 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
         }
     }
 
-    private func activateSession() throws {
-        guard intent.canStartPlayback else { throw PlaybackError.interrupted }
+    private func activateSession(explicitRequest: Bool = false) throws {
+        guard explicitRequest || intent.canStartPlayback else { throw PlaybackError.interrupted }
         let session = AVAudioSession.sharedInstance()
-        if !sessionConfigured {
-            try session.setCategory(.playback, mode: .default, options: [])
-            sessionConfigured = true
+        do {
+            if !sessionConfigured {
+                try session.setCategory(.playback, mode: .default, options: [])
+                sessionConfigured = true
+            }
+            if explicitRequest || !sessionActive {
+                try session.setActive(true)
+                sessionActive = true
+                playbackLog.info("session activation success explicit=\(explicitRequest, privacy: .public)")
+            }
+        } catch {
+            sessionActive = false
+            playbackLog.error("session activation failed explicit=\(explicitRequest, privacy: .public) code=\((error as NSError).code, privacy: .public)")
+            throw error
         }
-        if !sessionActive {
-            try session.setActive(true)
-            sessionActive = true
-        }
+    }
+
+    private func reportSessionActivationFailure(_ error: Error) {
+        intent.explicitActivationFailed()
+        player?.pause()
+        isPlaying = false
+        elapsed = player?.currentTime ?? elapsed
+        errorMessage = "Audio is temporarily unavailable. End the call or other audio interruption, then tap Play again.\n\n\(error.localizedDescription)"
+        logPlaybackState("activation-paused")
+        refreshNowPlaying()
+        saveCheckpoint()
+    }
+
+    private func logPlaybackState(_ event: String) {
+        playbackLog.info("\(event, privacy: .public) app=\(UIApplication.shared.applicationState.rawValue, privacy: .public) playing=\(self.isPlaying, privacy: .public) actual=\(self.player?.isPlaying ?? false, privacy: .public) loading=\(self.isLoading, privacy: .public) wants=\(self.intent.wantsPlayback, privacy: .public) interrupted=\(self.intent.isInterrupted, privacy: .public) session=\(self.sessionActive, privacy: .public)")
     }
 
     private func tick() {
@@ -522,6 +577,11 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
     private func interrupted(_ notification: Notification) {
         guard let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
             let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+        let reason = notification.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt ?? UInt.max
+        let options = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+        let suspended = notification.userInfo?[AVAudioSessionInterruptionWasSuspendedKey] as? Bool ?? false
+        playbackLog.info("interruption type=\(raw, privacy: .public) reason=\(reason, privacy: .public) options=\(options, privacy: .public) suspended=\(suspended, privacy: .public)")
+        logPlaybackState("interruption-before")
         switch type {
         case .began:
             intent.interruptionBegan()
@@ -535,15 +595,18 @@ final class PlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegat
             }
         @unknown default: break
         }
+        logPlaybackState("interruption-after")
     }
 
     private func routeChanged(_ notification: Notification) {
         guard let reason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt else { return }
+        playbackLog.info("route change reason=\(reason, privacy: .public)")
         if AVAudioSession.RouteChangeReason(rawValue: reason) == .oldDeviceUnavailable {
             // Do not unexpectedly continue through the phone speaker when a
             // wired headset or Bluetooth audio device disconnects.
             pause()
         }
+        logPlaybackState("route-after")
     }
 
     private func mediaServicesReset() {
@@ -663,12 +726,19 @@ private final class CheckpointBackgroundTask {
 
     private init() {
         identifier = UIApplication.shared.beginBackgroundTask(withName: "Save playback position") { [weak self] in
-            Task { @MainActor [weak self] in self?.end() }
+            // UIKit guarantees this callback is on main. End before returning
+            // to UIKit rather than enqueueing cleanup behind other actor work.
+            MainActor.assumeIsolated {
+                playbackLog.info("checkpoint background assertion expiry")
+                self?.end()
+            }
         }
+        playbackLog.info("checkpoint background assertion start id=\(self.identifier.rawValue, privacy: .public)")
     }
 
     func end() {
         guard identifier != .invalid else { return }
+        playbackLog.info("checkpoint background assertion end id=\(self.identifier.rawValue, privacy: .public)")
         UIApplication.shared.endBackgroundTask(identifier)
         identifier = .invalid
     }

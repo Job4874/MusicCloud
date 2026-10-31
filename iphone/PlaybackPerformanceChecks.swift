@@ -57,6 +57,8 @@ enum PlaybackPerformanceChecks {
         var intent = PlaybackIntentState()
         intent.requestPlay()
         require(intent.canStartPlayback, "Play did not record user intent")
+        require(intent.shouldPauseForToggle(isPlaying: false, isLoading: true),
+            "An active file load did not offer a Pause action")
         intent.requestPause()
         require(!intent.canStartPlayback, "A delayed load could undo Pause")
 
@@ -64,6 +66,9 @@ enum PlaybackPerformanceChecks {
         intent.interruptionBegan()
         intent.interruptionBegan()
         require(!intent.canStartPlayback, "Playback can activate during a call")
+        require(!intent.shouldPauseForToggle(isPlaying: false, isLoading: false)
+            && !intent.shouldPauseForToggle(isPlaying: false, isLoading: true),
+            "The visible Play action was interpreted as Pause because interrupted intent remained true")
         require(intent.interruptionEnded(shouldResume: true) && intent.canStartPlayback,
             "A duplicate interruption notification lost the pre-call playback intent")
         require(!intent.interruptionEnded(shouldResume: true) && intent.canStartPlayback,
@@ -93,6 +98,31 @@ enum PlaybackPerformanceChecks {
         intent.requestPause()
         require(!intent.interruptionEnded(shouldResume: true),
             "Media-services reset allowed an automatic post-call restart")
+
+        // A missing end notification must not permanently disable explicit
+        // Play. Only a successful fresh OS activation may clear that gate.
+        intent.requestPlay()
+        intent.interruptionBegan()
+        intent.requestPlay()
+        require(!intent.canStartPlayback, "Requesting Play alone bypassed the interruption")
+        intent.explicitActivationFailed()
+        require(!intent.canStartPlayback && intent.isInterrupted && !intent.wantsPlayback,
+            "Failed OS activation allowed a delayed load to start")
+        require(!intent.interruptionEnded(shouldResume: true),
+            "An end callback overrode the failed activation's paused state")
+        intent.interruptionBegan()
+        intent.requestPlay()
+        intent.explicitActivationSucceeded()
+        require(intent.canStartPlayback && !intent.isInterrupted,
+            "Successful explicit OS activation did not recover a missing end notification")
+        intent.requestPause()
+        require(!intent.interruptionEnded(shouldResume: true) && !intent.canStartPlayback,
+            "A late interruption end undid Pause after explicit recovery")
+        intent.requestPlay()
+        intent.explicitActivationSucceeded()
+        intent.interruptionBegan()
+        require(!intent.canStartPlayback,
+            "A delayed load could bypass an interruption that arrived after explicit selection")
 
         let revision = PlaybackWorkRevision()
         let first = revision.advance(), second = revision.advance()
