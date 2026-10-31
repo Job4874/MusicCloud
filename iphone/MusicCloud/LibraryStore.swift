@@ -653,7 +653,8 @@ final class LibraryStore: ObservableObject {
                 return true
             }) else { return ([], "Could not open the music folder.") }
         var result: [Track] = []
-        for case let url as URL in enumerator {
+        while let item = enumerator.nextObject() {
+            guard let url = item as? URL else { continue }
             if Task.isCancelled { break }
             let values: URLResourceValues
             do {
