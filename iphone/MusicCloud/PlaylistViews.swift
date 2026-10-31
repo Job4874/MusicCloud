@@ -1,80 +1,105 @@
 import SwiftUI
 
+private struct PlaylistCardSnapshot: Identifiable {
+    let id: UUID
+    let name: String
+    let available: Int
+    let total: Int
+    let covers: [Data]
+    let searchKey: String
+}
+
 @MainActor
 struct PlaylistsView: View {
     @EnvironmentObject private var library: LibraryStore
+    @State private var query = ""
     @State private var showCreate = false
     @State private var playlistName = ""
-    @State private var deleting: Playlist?
-    @State private var query = ""
-
-    private var visiblePlaylists: [Playlist] {
-        let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        return text.isEmpty ? library.state.playlists : library.state.playlists.filter { $0.name.localizedStandardContains(text) }
-    }
-
+    @State private var deletingID: UUID?
+    @State private var createdID: UUID?
+    @State private var cards: [PlaylistCardSnapshot] = []
+    @State private var filtered: [PlaylistCardSnapshot] = []
+    @State private var likedCovers: [Data] = []
     var body: some View {
         List {
-            if library.state.playlists.isEmpty {
-                Section {
-                    VStack(spacing: 16) {
-                        Image(systemName: "music.note.list").font(.system(size: 42, weight: .light)).foregroundStyle(Theme.accent)
-                        Text("Your first mix starts here").font(.headline)
-                        Text("Add songs, arrange their order, and play them any time.")
-                            .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                        Button("Create playlist") { showCreate = true }.buttonStyle(.borderedProminent).foregroundStyle(Theme.background)
-                    }.frame(maxWidth: .infinity).padding(.vertical, 30)
-                }.listRowBackground(Theme.surface)
-            } else {
-                Section("\(visiblePlaylists.count) playlists") {
-                    if visiblePlaylists.isEmpty { Text("No playlists match your search.").foregroundStyle(.secondary) }
-                    ForEach(visiblePlaylists) { playlist in
-                        NavigationLink {
-                            PlaylistDetailView(playlistID: playlist.id)
-                        } label: {
-                            HStack(spacing: 12) {
-                                ArtworkView(data: library.artwork(for: playlist), size: 60, symbol: "music.note.list")
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Text(playlist.name).font(.headline).lineLimit(1)
-                                    Text("\(library.playlistTracks(playlist).count) available · \(library.playlistEntryCount(playlist)) total")
-                                        .font(.caption).foregroundStyle(.secondary)
-                                }
-                            }.padding(.vertical, 5)
-                        }
-                        .swipeActions { Button("Delete", role: .destructive) { deleting = playlist } }
-                        .listRowBackground(Theme.surface)
-                    }
+            if query.isEmpty || "liked songs".contains(query.musicSortKey) {
+                Section { LikedSongsLink(covers: likedCovers) }
+                    .listRowInsets(EdgeInsets(top: 8, leading: 18, bottom: 18, trailing: 18))
+                    .listRowBackground(Color.clear).listRowSeparator(.hidden)
+            }
+            Section {
+                if filtered.isEmpty {
+                    MusicEmptyState(symbol: query.isEmpty ? "music.note.list" : "magnifyingglass", title: query.isEmpty ? "Make a playlist" : "No matching playlists",
+                        detail: query.isEmpty ? "Bring your favorite songs together for a drive, a workout, or any moment." : "Try another playlist name.")
+                        .listRowBackground(Color.clear).listRowSeparator(.hidden)
+                }
+                ForEach(filtered) { card in
+                    NavigationLink { PlaylistDetailView(playlistID: card.id) } label: {
+                        HStack(spacing: 15) {
+                            CollectionArtwork(covers: card.covers, size: 72)
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(card.name).font(.system(size: 17, weight: .semibold)).foregroundStyle(.white).lineLimit(2)
+                                Text(card.available == card.total ? "\(card.total) songs" : "\(card.available) on iPhone · \(card.total) saved")
+                                    .font(.caption).foregroundStyle(Theme.subdued)
+                            }
+                        }.padding(.vertical, 7)
+                    }.musicSongListRow()
+                        .swipeActions { Button("Delete", role: .destructive) { deletingID = card.id } }
+                }
+            } header: { MusicSectionHeading(title: "Your playlists", count: cards.count).padding(.vertical, 6) }
+        }.listStyle(.plain).scrollContentBackground(.hidden).background(Theme.background)
+            .navigationTitle("Playlists")
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Find a playlist")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button { playlistName = ""; showCreate = true } label: {
+                        Image(systemName: "plus").font(.body.weight(.semibold)).frame(width: 40, height: 40).background(Theme.surface, in: Circle())
+                    }.accessibilityLabel("Create playlist")
                 }
             }
+            .alert("New playlist", isPresented: $showCreate) {
+                TextField("Playlist name", text: $playlistName)
+                Button("Create") { createdID = library.createPlaylist(name: playlistName); playlistName = "" }
+                Button("Cancel", role: .cancel) { playlistName = "" }
+            }
+            .navigationDestination(isPresented: Binding(get: { createdID != nil }, set: { if !$0 { createdID = nil } })) {
+                if let id = createdID { PlaylistDetailView(playlistID: id) }
+            }
+            .confirmationDialog("Delete playlist?", isPresented: Binding(get: { deletingID != nil }, set: { if !$0 { deletingID = nil } }), titleVisibility: .visible) {
+                if let id = deletingID {
+                    Button("Delete playlist", role: .destructive) { library.deletePlaylist(id: id); deletingID = nil }
+                }
+            } message: { Text("Your audio files stay on this iPhone.") }
+            .onAppear { reload() }.onChange(of: library.catalogRevision) { _ in reload() }
+            .onChange(of: query) { _ in filterCards() }
+    }
+    private func reload() {
+        cards = library.visiblePlaylists.map { playlist in
+            let tracks = library.playlistTracks(playlist)
+            return PlaylistCardSnapshot(id: playlist.id, name: playlist.name, available: tracks.count,
+                total: library.playlistEntryCount(playlist), covers: musicCoverSamples(tracks, fallback: library.artwork(for: playlist)), searchKey: playlist.name.musicSortKey)
         }
-        .scrollContentBackground(.hidden).background(Theme.background)
-        .navigationTitle("Playlists")
-        .searchable(text: $query, prompt: "Find a playlist")
-        .toolbar { Button { playlistName = ""; showCreate = true } label: { Image(systemName: "plus") }.accessibilityLabel("Create playlist") }
-        .alert("New playlist", isPresented: $showCreate) {
-            TextField("Playlist name", text: $playlistName)
-            Button("Create") { library.createPlaylist(name: playlistName); playlistName = "" }
-            Button("Cancel", role: .cancel) { playlistName = "" }
-        } message: { Text("Give your next mix a name.") }
-        .confirmationDialog("Delete playlist?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
-            if let playlist = deleting {
-                Button("Delete \(playlist.name)", role: .destructive) {
-                    library.deletePlaylist(id: playlist.id)
-                    deleting = nil
-                }
-            }
-        } message: { Text("The audio files will stay in your library.") }
+        likedCovers = musicCoverSamples(library.likedTracks)
+        filterCards()
+    }
+    private func filterCards() {
+        let key = query.trimmingCharacters(in: .whitespacesAndNewlines).musicSortKey
+        filtered = key.isEmpty ? cards : cards.filter { $0.searchKey.contains(key) }
     }
 }
 
 private struct PlaylistRowOccurrence: Identifiable {
     enum Identity: Hashable { case entry(UUID), legacyIndex(Int) }
     let id: Identity
+    let sourceOffset: Int
     let trackID: String?
     let title: String
     let artist: String
     let status: String
+    let artwork: Data?
+    let track: Track?
     let playbackIndex: Int?
+    let searchKey: String
 }
 
 @MainActor
@@ -85,123 +110,144 @@ struct PlaylistDetailView: View {
     @State private var showAdd = false
     @State private var showRename = false
     @State private var updatedName = ""
-
+    @State private var query = ""
+    @State private var rows: [PlaylistRowOccurrence] = []
+    @State private var visibleRows: [PlaylistRowOccurrence] = []
+    @State private var tracks: [Track] = []
+    @State private var covers: [Data] = []
+    @State private var totalDuration: TimeInterval = 0
     private var playlist: Playlist? { library.playlist(id: playlistID) }
-    private var tracks: [Track] { playlist.map(library.playlistTracks) ?? [] }
-    private var rows: [PlaylistRowOccurrence] {
-        guard let playlist else { return [] }
-        var result: [PlaylistRowOccurrence] = []
-        var playableIndex = 0
-        if let entries = playlist.entries {
-            for entry in entries {
-                let available = entry.trackID.flatMap { library.track(id: $0) } != nil
-                result.append(PlaylistRowOccurrence(id: .entry(entry.id), trackID: entry.trackID,
-                    title: entry.title, artist: entry.artist, status: entry.status,
-                    playbackIndex: available ? playableIndex : nil))
-                if available { playableIndex += 1 }
-            }
-        } else {
-            // Older native playlists can repeat a path. Index identity keeps
-            // every occurrence visible until an edit promotes it to UUID rows.
-            for (offset, id) in playlist.trackIDs.enumerated() {
-                let track = library.track(id: id)
-                result.append(PlaylistRowOccurrence(id: .legacyIndex(offset), trackID: id,
-                    title: track?.title ?? (id as NSString).lastPathComponent,
-                    artist: track?.artist ?? "Unknown artist", status: track == nil ? "missing" : "downloaded",
-                    playbackIndex: track == nil ? nil : playableIndex))
-                if track != nil { playableIndex += 1 }
-            }
-        }
-        return result
-    }
+    private var canonical: Bool { library.likedPlaylistID == playlistID }
 
     var body: some View {
         List {
             if let playlist {
-                Section {
-                    VStack(alignment: .leading, spacing: 16) {
-                        HStack(spacing: 16) {
-                            ArtworkView(data: library.artwork(for: playlist), size: 88, symbol: "music.note.list")
-                            VStack(alignment: .leading, spacing: 7) {
-                                Text(playlist.name).font(.title3.bold()).lineLimit(2)
-                                Text("\(tracks.count) available · \(library.playlistEntryCount(playlist)) total")
-                                    .font(.subheadline).foregroundStyle(.secondary)
-                                Text("\(tracks.reduce(0) { $0 + $1.duration }.musicTime) of music")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
-                        HStack {
-                            Button { playback.playAll(tracks, contextName: playlist.name, playlistID: playlist.id) } label: {
+                if query.isEmpty {
+                    Section {
+                        HStack(alignment: .center, spacing: 18) {
+                            CollectionArtwork(covers: covers, size: 128, symbol: canonical ? "heart.fill" : "music.note.list")
+                                .shadow(color: .black.opacity(0.2), radius: 12, y: 6)
+                            VStack(alignment: .leading, spacing: 9) {
+                                Text(canonical ? "SAVED MUSIC" : "PLAYLIST").font(.system(size: 10, weight: .bold)).tracking(1.5).foregroundStyle(Theme.accent)
+                                Text(canonical ? "Liked Songs" : playlist.name).font(.system(size: 25, weight: .bold)).lineLimit(3)
+                                Text("\(tracks.count) on iPhone · \(rows.count) saved").font(.caption).foregroundStyle(Theme.subdued)
+                                Text(totalDuration.musicTime + " of music").font(.caption2).foregroundStyle(Theme.subdued)
+                            }.frame(maxWidth: .infinity, alignment: .leading)
+                        }.padding(.top, 12).padding(.bottom, 14)
+                        HStack(spacing: 10) {
+                            Button { playback.playAll(tracks, contextName: canonical ? "Liked Songs" : playlist.name, playlistID: playlistID) } label: {
                                 Label("Play", systemImage: "play.fill").frame(maxWidth: .infinity)
-                            }.buttonStyle(.borderedProminent).foregroundStyle(Theme.background)
-                            Button { playback.playAll(tracks, shuffled: true, contextName: playlist.name, playlistID: playlist.id) } label: {
+                            }.buttonStyle(MusicActionStyle())
+                            Button { playback.playAll(tracks, shuffled: true, contextName: canonical ? "Liked Songs" : playlist.name, playlistID: playlistID) } label: {
                                 Label("Shuffle", systemImage: "shuffle").frame(maxWidth: .infinity)
-                            }.buttonStyle(.bordered)
-                        }.disabled(tracks.isEmpty)
-                    }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4)
-                }.listRowBackground(Theme.background)
+                            }.buttonStyle(MusicActionStyle(prominent: false))
+                        }.disabled(tracks.isEmpty).padding(.bottom, 10)
+                    }.listRowBackground(Color.clear).listRowSeparator(.hidden)
+                }
                 Section {
-                    if rows.isEmpty {
-                        Button { showAdd = true } label: {
-                            Label("Add your first songs", systemImage: "plus.circle")
-                                .frame(maxWidth: .infinity).padding(.vertical, 24)
-                        }.listRowBackground(Theme.surface)
-                    }
-                    ForEach(rows) { row in
-                        if let index = row.playbackIndex, tracks.indices.contains(index) {
-                            TrackRow(track: tracks[index], context: tracks, playbackIndex: index, contextName: playlist.name, playlistID: playlist.id)
-                                .listRowBackground(Theme.surface)
+                    if visibleRows.isEmpty {
+                        if query.isEmpty {
+                            Button { showAdd = true } label: { Label("Add songs", systemImage: "plus.circle.fill").frame(maxWidth: .infinity).padding(.vertical, 24) }
+                                .listRowBackground(Color.clear).listRowSeparator(.hidden)
                         } else {
-                            HStack(spacing: 12) {
-                                ArtworkView(data: nil, size: 46, symbol: "music.note")
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Text(row.title.isEmpty ? "Untitled song" : row.title)
-                                        .font(.subheadline.weight(.semibold)).lineLimit(2)
-                                    Text(row.artist.isEmpty ? "Unknown artist" : row.artist)
-                                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                                    Text(unavailableStatus(for: row))
-                                        .font(.caption).foregroundStyle(Theme.subdued).lineLimit(2)
-                                }
-                            }.padding(.vertical, 3).listRowBackground(Theme.surface)
+                            MusicEmptyState(symbol: "magnifyingglass", title: "No matches", detail: "Try another song or artist.")
+                                .listRowBackground(Color.clear).listRowSeparator(.hidden)
                         }
                     }
-                    .onDelete { library.removeTracks(at: $0, from: playlistID) }
-                    .onMove { library.moveTracks(from: $0, to: $1, in: playlistID) }
-                } footer: {
-                    if !rows.isEmpty {
-                        Text("Tap Edit to drag songs into order or remove them from this playlist.")
+                    ForEach(visibleRows) { row in
+                        if let track = row.track {
+                            TrackRow(track: track, context: tracks, playbackIndex: row.playbackIndex,
+                                contextName: canonical ? "Liked Songs" : playlist.name, playlistID: playlistID).musicSongListRow()
+                        } else {
+                            HStack(spacing: 13) {
+                                ArtworkView(data: row.artwork, size: 54, symbol: "icloud.slash")
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(row.title.isEmpty ? "Untitled song" : row.title).font(.system(size: 15, weight: .medium)).foregroundStyle(.white.opacity(0.65)).lineLimit(1)
+                                    Text(row.artist.isEmpty ? "Unknown artist" : row.artist).font(.system(size: 12)).foregroundStyle(Theme.subdued).lineLimit(1)
+                                    Text(row.status == "downloaded" || row.status == "missing" ? "Not on this iPhone" : "Unavailable")
+                                        .font(.system(size: 10, weight: .medium)).foregroundStyle(Theme.subdued.opacity(0.8))
+                                }
+                                Spacer(minLength: 0)
+                                Image(systemName: "icloud.slash").font(.caption).foregroundStyle(Theme.subdued.opacity(0.45)).frame(width: 36)
+                            }.padding(.vertical, 7).musicSongListRow()
+                        }
+                    }
+                    .onDelete(perform: removeRows)
+                    .onMove { source, destination in if query.isEmpty { library.moveTracks(from: source, to: destination, in: playlistID) } }
+                    .moveDisabled(!query.isEmpty)
+                } header: { MusicSectionHeading(title: query.isEmpty ? "Songs" : "Results", count: visibleRows.count).padding(.vertical, 6) }
+                footer: {
+                    if !rows.isEmpty { Text("Songs not on this iPhone stay saved in your playlist.").font(.caption).foregroundStyle(Theme.subdued).padding(.top, 10) }
+                }
+            } else { MusicEmptyState(symbol: "music.note.list", title: "Playlist removed", detail: "Your audio files are still in your library.") }
+        }.listStyle(.plain).scrollContentBackground(.hidden).background(Theme.background)
+            .navigationTitle(canonical ? "Liked Songs" : "Playlist").navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $query, prompt: "Search this playlist")
+            .toolbar {
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    Button { showAdd = true } label: { Image(systemName: "plus").frame(width: 32, height: 40) }.accessibilityLabel("Add songs")
+                    EditButton().font(.subheadline).disabled(rows.isEmpty || library.isLibraryProtected)
+                    if !canonical {
+                        Menu { Button("Rename playlist") { updatedName = playlist?.name ?? ""; showRename = true } }
+                            label: { Image(systemName: "ellipsis").frame(width: 30, height: 40) }.accessibilityLabel("Playlist options")
                     }
                 }
-            } else {
-                Text("This playlist was deleted.")
             }
-        }
-        .scrollContentBackground(.hidden).background(Theme.background)
-        .navigationTitle(playlist?.name ?? "Playlist").navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItemGroup(placement: .navigationBarTrailing) {
-                EditButton().disabled(rows.isEmpty || library.isLibraryProtected)
-                Menu {
-                    Button { showAdd = true } label: { Label("Add songs", systemImage: "plus") }
-                    Button { updatedName = playlist?.name ?? ""; showRename = true } label: { Label("Rename", systemImage: "pencil") }
-                } label: { Image(systemName: "ellipsis.circle") }
-                .accessibilityLabel("Playlist options")
+            .sheet(isPresented: $showAdd) { AddSongsView(playlistID: playlistID) }
+            .alert("Rename playlist", isPresented: $showRename) {
+                TextField("Playlist name", text: $updatedName)
+                Button("Save") { library.renamePlaylist(id: playlistID, name: updatedName) }
+                Button("Cancel", role: .cancel) { }
             }
-        }
-        .sheet(isPresented: $showAdd) { AddSongsView(playlistID: playlistID) }
-        .alert("Rename playlist", isPresented: $showRename) {
-            TextField("Playlist name", text: $updatedName)
-            Button("Save") { library.renamePlaylist(id: playlistID, name: updatedName) }
-            Button("Cancel", role: .cancel) { }
-        }
+            .onAppear { reload() }.onChange(of: library.catalogRevision) { _ in reload() }
+            .onChange(of: query) { _ in filterRows() }
     }
 
-    private func unavailableStatus(for row: PlaylistRowOccurrence) -> String {
-        if row.status.lowercased() == "downloaded" || row.status.lowercased() == "missing" {
-            return "File missing on this iPhone"
+    private func reload() {
+        guard let playlist else { rows = []; visibleRows = []; tracks = []; covers = []; totalDuration = 0; return }
+        var nextRows: [PlaylistRowOccurrence] = []
+        var nextTracks: [Track] = []
+        if let entries = playlist.entries {
+            for (offset, entry) in entries.enumerated() {
+                let track = entry.trackID.flatMap { library.track(id: $0) }
+                nextRows.append(PlaylistRowOccurrence(id: .entry(entry.id), sourceOffset: offset, trackID: entry.trackID,
+                    title: entry.title, artist: entry.artist, status: entry.status, artwork: library.artwork(for: entry), track: track,
+                    playbackIndex: track == nil ? nil : nextTracks.count, searchKey: (entry.title + " " + entry.artist).musicSortKey))
+                if let track { nextTracks.append(track) }
+            }
+        } else {
+            for (offset, path) in playlist.trackIDs.enumerated() {
+                let track = library.track(id: path)
+                let title = track?.title ?? (path as NSString).lastPathComponent
+                let artist = track?.artist ?? "Unknown artist"
+                nextRows.append(PlaylistRowOccurrence(id: .legacyIndex(offset), sourceOffset: offset, trackID: path,
+                    title: title, artist: artist, status: "missing", artwork: track?.artwork, track: track,
+                    playbackIndex: track == nil ? nil : nextTracks.count, searchKey: (title + " " + artist).musicSortKey))
+                if let track { nextTracks.append(track) }
+            }
         }
-        let status = row.status.trimmingCharacters(in: .whitespacesAndNewlines)
-        return status.isEmpty ? "Unavailable" : status.replacingOccurrences(of: "_", with: " ").capitalized
+        rows = nextRows; tracks = nextTracks
+        totalDuration = nextTracks.reduce(0) { $0 + $1.duration }
+        covers = musicCoverSamples(nextTracks, fallback: library.artwork(for: playlist))
+        filterRows()
+    }
+    private func filterRows() {
+        let key = query.trimmingCharacters(in: .whitespacesAndNewlines).musicSortKey
+        visibleRows = key.isEmpty ? rows : rows.filter { $0.searchKey.contains(key) }
+    }
+    private func removeRows(_ offsets: IndexSet) {
+        guard let current = playlist else { return }
+        let selected = offsets.compactMap { visibleRows.indices.contains($0) ? visibleRows[$0] : nil }
+        let actualOffsets: IndexSet
+        if let entries = current.entries {
+            let ids = Set(selected.compactMap { row -> UUID? in if case .entry(let id) = row.id { return id }; return nil })
+            actualOffsets = IndexSet(entries.indices.filter { ids.contains(entries[$0].id) })
+        } else {
+            actualOffsets = IndexSet(selected.compactMap { row in
+                current.trackIDs.indices.contains(row.sourceOffset) && current.trackIDs[row.sourceOffset] == row.trackID ? row.sourceOffset : nil
+            })
+        }
+        library.removeTracks(at: actualOffsets, from: playlistID)
     }
 }
 
@@ -211,39 +257,45 @@ private struct AddSongsView: View {
     @Environment(\.dismiss) private var dismiss
     let playlistID: UUID
     @State private var query = ""
-
-    private var tracks: [Track] {
-        query.isEmpty ? library.tracks : library.tracks.filter { $0.searchableText.localizedStandardContains(query) }
-    }
-
+    @State private var snapshot = MusicCatalogSnapshot()
+    @State private var tracks: [Track] = []
+    @State private var selectedIDs: Set<String> = []
+    private var canonical: Bool { library.likedPlaylistID == playlistID }
     var body: some View {
         NavigationStack {
             List {
-                if tracks.isEmpty { Text(library.tracks.isEmpty ? "Import music in the Library tab first." : "No songs match your search.").foregroundStyle(.secondary) }
-                ForEach(tracks) { track in
-                    let selected = library.playlist(id: playlistID)?.trackIDs.contains(track.id) == true
-                    Button {
-                        if selected { library.removeTrack(id: track.id, from: playlistID) }
-                        else { library.add(track, to: playlistID) }
-                    } label: {
-                        HStack(spacing: 12) {
-                            ArtworkView(data: track.artwork, size: 42)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(track.title).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
-                                Text(track.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                            }
-                            Spacer()
-                            Image(systemName: selected ? "checkmark.circle.fill" : "plus.circle").foregroundStyle(Theme.accent)
-                        }.padding(.vertical, 3)
-                    }.listRowBackground(Theme.surface)
-                    .accessibilityLabel("\(selected ? "Remove" : "Add") \(track.title)")
-                }
-            }
-            .scrollContentBackground(.hidden).background(Theme.background)
-            .navigationTitle("Add songs").navigationBarTitleDisplayMode(.inline)
-            .searchable(text: $query, prompt: "Search your library")
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+                Section {
+                    if tracks.isEmpty { MusicEmptyState(symbol: "magnifyingglass", title: "No songs found", detail: "Import music in Library or try another search.").listRowBackground(Color.clear) }
+                    ForEach(tracks) { track in
+                        let selected = selectedIDs.contains(track.id)
+                        Button {
+                            if canonical { library.toggleLike(track) }
+                            else if selected { library.removeTrack(id: track.id, from: playlistID) }
+                            else { library.add(track, to: playlistID) }
+                        } label: {
+                            HStack(spacing: 13) {
+                                ArtworkView(data: track.artwork, size: 50)
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(track.title).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                                    Text(track.artist).font(.caption).foregroundStyle(Theme.subdued).lineLimit(1)
+                                }
+                                Spacer()
+                                Image(systemName: selected ? "checkmark.circle.fill" : "plus.circle").font(.system(size: 23)).foregroundStyle(selected ? Theme.accent : Theme.subdued)
+                            }.padding(.vertical, 6).contentShape(Rectangle())
+                        }.buttonStyle(.plain).musicSongListRow().accessibilityLabel("\(selected ? "Remove" : "Add") \(track.title)")
+                    }
+                } header: { Text("\(selectedIDs.count) selected").font(.caption).foregroundStyle(Theme.subdued).textCase(nil) }
+            }.listStyle(.plain).scrollContentBackground(.hidden).background(Theme.background)
+                .navigationTitle(canonical ? "Add liked songs" : "Add songs").navigationBarTitleDisplayMode(.inline)
+                .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Find a song")
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.fontWeight(.semibold) } }
+                .onAppear { reload() }.onChange(of: library.catalogRevision) { _ in reload() }
+                .onChange(of: query) { _ in tracks = snapshot.matching(query) }
         }.preferredColorScheme(.dark).tint(Theme.accent)
     }
+    private func reload() {
+        snapshot = MusicCatalogSnapshot(tracks: library.tracks)
+        selectedIDs = canonical ? Set(library.likedTracks.map(\.id)) : Set(library.playlist(id: playlistID)?.trackIDs ?? [])
+        tracks = snapshot.matching(query)
+    }
 }
-

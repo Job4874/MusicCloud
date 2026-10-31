@@ -116,7 +116,7 @@ struct PlaybackQueueContext: Equatable {
     }
 }
 
-struct PlaybackCheckpoint: Codable {
+struct PlaybackCheckpoint: Codable, Sendable {
     static let maximumBytes = 16 * 1024 * 1024
     static let maximumOccurrences = 50_000
     let version: Int
@@ -186,10 +186,148 @@ struct PlaybackCheckpoint: Codable {
         return state
     }
 
-    private static func isRelativePath(_ path: String) -> Bool {
+    static func isRelativePath(_ path: String) -> Bool {
         guard !path.isEmpty, !path.hasPrefix("/"), !path.contains("\\"), !path.contains("\0"), !path.contains(":") else { return false }
         return path.split(separator: "/", omittingEmptySubsequences: false).allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
     }
 }
 
 enum PlaybackQueueError: Error { case invalidCheckpoint }
+
+// The user's intent is separate from whether the audio hardware is currently
+// playing. A delayed file open or interruption ending must never undo Pause.
+struct PlaybackIntentState: Equatable {
+    private(set) var wantsPlayback = false
+    private(set) var isInterrupted = false
+    private var resumeAfterInterruption = false
+
+    var canStartPlayback: Bool { wantsPlayback && !isInterrupted }
+
+    mutating func requestPlay() {
+        wantsPlayback = true
+        if isInterrupted { resumeAfterInterruption = true }
+    }
+
+    mutating func requestPause() {
+        wantsPlayback = false
+        resumeAfterInterruption = false
+    }
+
+    mutating func interruptionBegan() {
+        if !isInterrupted { resumeAfterInterruption = wantsPlayback }
+        isInterrupted = true
+    }
+
+    @discardableResult
+    mutating func interruptionEnded(shouldResume: Bool) -> Bool {
+        guard isInterrupted else { return false }
+        let resume = shouldResume && resumeAfterInterruption && wantsPlayback
+        isInterrupted = false
+        resumeAfterInterruption = false
+        wantsPlayback = resume
+        return resume
+    }
+
+    mutating func mediaServicesReset() {
+        // A reset invalidates the player, not an already active phone call.
+        requestPause()
+    }
+}
+
+// Both file preparation and checkpoint jobs use a revision to discard obsolete
+// work. No AVAudioPlayer is ever shared concurrently between worker and main.
+final class PlaybackWorkRevision: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: UInt64 = 0
+
+    @discardableResult
+    func advance() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        value &+= 1
+        return value
+    }
+
+    func isCurrent(_ revision: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return revision == value
+    }
+}
+
+// Queue encoding, validation and atomic file operations stay on one worker.
+// Newer pending positions supersede older ones; an in-flight write always
+// finishes before the newer save/clear, so Stop cannot resurrect an old queue.
+final class PlaybackCheckpointStore: @unchecked Sendable {
+    private let url: URL
+    private let worker: DispatchQueue
+    private let revision = PlaybackWorkRevision()
+
+    init(url: URL) {
+        self.url = url
+        worker = DispatchQueue(label: "MusicCloud.playback-checkpoint", qos: .utility)
+    }
+
+    func load(completion: @escaping @Sendable (PlaybackCheckpoint?) -> Void) {
+        worker.async { [self] in completion(Self.read(from: url)) }
+    }
+
+    func save(_ checkpoint: PlaybackCheckpoint,
+              completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
+        submit(checkpoint, completion: completion)
+    }
+
+    func clear(completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
+        submit(nil, completion: completion)
+    }
+
+    private func submit(_ checkpoint: PlaybackCheckpoint?,
+                        completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
+        let ticket = revision.advance()
+        worker.async { [self] in
+            do {
+                guard revision.isCurrent(ticket) else { completion(.success(())); return }
+                if let checkpoint {
+                    _ = try checkpoint.validatedQueueState()
+                    let data = try JSONEncoder().encode(checkpoint)
+                    guard data.count <= PlaybackCheckpoint.maximumBytes else {
+                        throw PlaybackQueueError.invalidCheckpoint
+                    }
+                    // A seek/new track may have arrived during encoding.
+                    guard revision.isCurrent(ticket) else { completion(.success(())); return }
+                    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                        withIntermediateDirectories: true)
+                    try checkExistingFile()
+                    try data.write(to: url, options: .atomic)
+                } else {
+                    try checkExistingFile()
+                    if FileManager.default.fileExists(atPath: url.path) {
+                        try FileManager.default.removeItem(at: url)
+                    }
+                }
+                completion(.success(()))
+            } catch { completion(.failure(error)) }
+        }
+    }
+
+    private func checkExistingFile() throws {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        guard values.isRegularFile == true, values.isSymbolicLink != true else {
+            throw PlaybackQueueError.invalidCheckpoint
+        }
+    }
+
+    private static func read(from url: URL) -> PlaybackCheckpoint? {
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey]),
+            values.isRegularFile == true, values.isSymbolicLink != true,
+            let size = values.fileSize, size >= 0, size <= PlaybackCheckpoint.maximumBytes,
+            let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: PlaybackCheckpoint.maximumBytes + 1),
+            data.count <= PlaybackCheckpoint.maximumBytes,
+            let checkpoint = try? JSONDecoder().decode(PlaybackCheckpoint.self, from: data),
+            (try? checkpoint.validatedQueueState()) != nil else { return nil }
+        return checkpoint
+    }
+}

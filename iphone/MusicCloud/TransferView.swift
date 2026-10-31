@@ -7,6 +7,7 @@ struct TransferView: View {
     @EnvironmentObject private var library: LibraryStore
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var wifi = WiFiUploadServer()
+    @State private var showImport = false
     @State private var showExport = false
     @State private var backupDocument: PlaylistBackup?
     @State private var showRestore = false
@@ -16,125 +17,123 @@ struct TransferView: View {
     var body: some View {
         List {
             Section {
-                VStack(alignment: .leading, spacing: 14) {
-                    Image(systemName: "square.and.arrow.down").font(.system(size: 44, weight: .light)).foregroundStyle(Theme.accent)
-                    Text("Fill up. Take it with you.")
-                        .font(.system(size: 30, weight: .bold, design: .rounded))
-                    Text("MusicCloud plays files stored on your iPhone. Your computer can be turned off after the copy finishes.")
-                        .font(.subheadline).foregroundStyle(.secondary)
-                }.padding(.vertical, 12)
-            }.listRowBackground(Theme.background)
-            Section("Wi-Fi upload") {
-                Text("Copy music from your computer over the same private Wi-Fi. Keep your iPhone awake and this screen open until the transfer finishes.")
-                    .font(.subheadline).foregroundStyle(.secondary)
+                HStack(spacing: 15) {
+                    Image(systemName: "iphone").font(.system(size: 28, weight: .light)).foregroundStyle(Theme.accent)
+                        .frame(width: 56, height: 64).background(Theme.accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 15))
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text("On this iPhone").font(.headline)
+                        Text("\(library.tracks.count) songs · \(library.totalSize)").font(.subheadline).foregroundStyle(Theme.subdued)
+                        Text("Ready to play without a connection.").font(.caption).foregroundStyle(Theme.subdued)
+                    }
+                }.padding(.vertical, 5)
+            }.listRowBackground(Color.clear)
+            Section {
+                HStack(spacing: 12) {
+                    Image(systemName: "wifi").font(.system(size: 22)).foregroundStyle(Theme.accent).frame(width: 30)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Wi-Fi upload").font(.headline)
+                        Text("Add music from your computer.").font(.caption).foregroundStyle(Theme.subdued)
+                    }
+                    Spacer()
+                    if wifi.isRunning { Circle().fill(Theme.accent).frame(width: 8, height: 8) }
+                    else if wifi.isStarting { ProgressView().tint(Theme.accent) }
+                }.padding(.vertical, 5)
                 if let address = wifi.address {
-                    Text(address.absoluteString)
-                        .font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
-                    HStack(spacing: 24) {
-                        Button { UIPasteboard.general.string = address.absoluteString } label: {
-                            Label("Copy link", systemImage: "doc.on.doc")
-                        }
-                        ShareLink(item: address) { Label("Share link", systemImage: "square.and.arrow.up") }
-                    }.buttonStyle(.borderless)
-                    Text("Open this link in your computer’s browser and choose your audio files. Keep it private: anyone on this Wi-Fi with the link can upload while transfer is running.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 13) {
+                        Text("Open this link on a computer connected to the same Wi-Fi:").font(.caption).foregroundStyle(Theme.subdued)
+                        Text(address.absoluteString).font(.system(size: 12, design: .monospaced)).foregroundStyle(.white)
+                            .textSelection(.enabled).padding(12).frame(maxWidth: .infinity, alignment: .leading).background(Theme.background, in: RoundedRectangle(cornerRadius: 10))
+                        HStack(spacing: 20) {
+                            Button { UIPasteboard.general.string = address.absoluteString } label: { Label("Copy link", systemImage: "doc.on.doc") }
+                            ShareLink(item: address) { Label("Share", systemImage: "square.and.arrow.up") }
+                        }.font(.subheadline.weight(.medium)).buttonStyle(.borderless)
+                    }.padding(.vertical, 5)
                 }
-                if wifi.isStarting { ProgressView() }
-                Text(wifi.status).font(.caption).foregroundStyle(.secondary)
                 Button {
                     if wifi.isRunning || wifi.isStarting { wifi.stop() }
-                    else if !library.isLibraryProtected {
-                        wifi.start(documentsURL: library.documentsURL) { library.rescan() }
-                    }
+                    else if !library.isLibraryProtected { wifi.start(documentsURL: library.documentsURL) { library.rescan() } }
                 } label: {
-                    Label(wifi.isRunning || wifi.isStarting ? "Stop Wi-Fi transfer" : "Start Wi-Fi transfer",
-                        systemImage: wifi.isRunning || wifi.isStarting ? "stop.circle" : "wifi")
-                }.disabled(library.isLibraryProtected)
-                Text("Up to 512 MB per file. Each transfer gets a new link. Leaving this screen or sending MusicCloud to the background stops the server and removes unfinished uploads. Completed files stay on your iPhone.")
-                    .font(.caption).foregroundStyle(.secondary)
+                    Label(wifi.isRunning || wifi.isStarting ? "Stop transfer" : "Start Wi-Fi transfer", systemImage: wifi.isRunning || wifi.isStarting ? "stop.fill" : "arrow.up.arrow.down")
+                        .frame(maxWidth: .infinity)
+                }.buttonStyle(MusicActionStyle(prominent: !wifi.isRunning)).disabled(library.isLibraryProtected).padding(.vertical, 5)
+                Text(wifi.status).font(.caption).foregroundStyle(Theme.subdued)
+            } footer: {
+                Text(wifi.isRunning ? "Keep this screen open. Anyone on this Wi-Fi with the link can upload until you stop the transfer." : "Your phone and computer must use the same private Wi-Fi. Files up to 512 MB are supported.")
+                    .font(.caption).foregroundStyle(Theme.subdued)
             }.listRowBackground(Theme.surface)
-            Section("From your Windows computer") {
-                TransferStep(number: "1", title: "Connect with a USB cable", detail: "Unlock your iPhone, tap Trust if asked, then open Apple Devices on your computer.")
-                TransferStep(number: "2", title: "Copy files to MusicCloud", detail: "Select your iPhone → Files → MusicCloud. Add your audio files and wait until the transfer finishes. Keep the originals on your computer.")
-                TransferStep(number: "3", title: "Open your library", detail: "Return to MusicCloud. It scans when you open the app. Tap the circular arrow in Library to rescan at any time.")
+            Section("More ways to add music") {
+                Button { showImport = true } label: { Label("Import from Files", systemImage: "folder.badge.plus").font(.subheadline.weight(.medium)).padding(.vertical, 5) }
+                DisclosureGroup {
+                    TransferStep(number: "1", title: "Connect your iPhone", detail: "Use a USB cable. Open Apple Devices on Windows, or Finder on a Mac.")
+                    TransferStep(number: "2", title: "Copy your audio", detail: "Select your iPhone, open Files, then MusicCloud. Add your audio files and wait for the copy to finish.")
+                    TransferStep(number: "3", title: "Refresh your library", detail: "Return to Library and pull down to refresh, or use Refresh library below.")
+                } label: { Label("Copy over USB", systemImage: "cable.connector").font(.subheadline.weight(.medium)).foregroundStyle(.white) }
             }.listRowBackground(Theme.surface)
-            Section("Already on your iPhone?") {
-                Label("Tap + in Library to copy audio from Files.", systemImage: "plus.circle")
-                    .font(.subheadline).listRowBackground(Theme.surface)
-                Text("Duplicate filenames receive a number. Imports never replace an existing file.")
-                    .font(.caption).foregroundStyle(.secondary).listRowBackground(Theme.surface)
-            }
             Section("Your library") {
                 LabeledContent("Songs", value: "\(library.tracks.count)")
-                LabeledContent("Audio storage", value: library.totalSize)
                 LabeledContent("Playlists", value: "\(library.state.playlists.count)")
-                if let lastScan = library.lastScan {
-                    LabeledContent("Last scan") { Text(lastScan, style: .time).foregroundStyle(.secondary) }
-                }
-                Button { library.rescan() } label: { Label("Rescan music", systemImage: "arrow.clockwise") }
-                    .disabled(library.isScanning)
-            }.listRowBackground(Theme.surface)
-            Section("Library backup") {
+                LabeledContent("Storage", value: library.totalSize)
+                Button { library.rescan() } label: {
+                    HStack { Label("Refresh library", systemImage: "arrow.clockwise"); Spacer(); if library.isScanning { ProgressView().tint(Theme.accent) } }
+                }.disabled(library.isScanning)
+            }.font(.subheadline).listRowBackground(Theme.surface)
+            Section("Keep a backup") {
                 Button {
-                    do {
-                        backupDocument = PlaylistBackup(data: try library.makeBackup())
-                        showExport = true
-                    } catch { library.message = "Could not prepare backup: \(error.localizedDescription)" }
+                    do { backupDocument = PlaylistBackup(data: try library.makeBackup()); showExport = true }
+                    catch { library.message = "Could not prepare backup: \(error.localizedDescription)" }
                 } label: { Label("Export library backup", systemImage: "square.and.arrow.up") }
-                Button { showRestore = true } label: { Label("Restore library backup", systemImage: "arrow.counterclockwise") }
-                    .disabled(isReadingBackup)
-                if isReadingBackup { ProgressView("Opening backup…") }
-                Text("Save the JSON file in On My iPhone → MusicCloud, then copy it to your computer in Apple Devices. The backup includes favorites, ordered playlists, and song detail edits; keep separate copies of your audio.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }.listRowBackground(Theme.surface)
-            Section("Formats and backups") {
-                Text("MP3, M4A, AAC, WAV, AIFF, FLAC, and CAF filenames are indexed. Playback depends on the file’s codec and iOS support. Protected subscription downloads do not work.")
-                Text("Keep your audio originals, a playlist export, and a device backup. Deleting the app deletes its local music, favorites, and playlists. Renaming or moving a file changes its library identity.")
-            }.font(.subheadline).foregroundStyle(.secondary).listRowBackground(Theme.surface)
+                Button { showRestore = true } label: {
+                    HStack { Label("Restore library backup", systemImage: "arrow.counterclockwise"); Spacer(); if isReadingBackup { ProgressView() } }
+                }.disabled(isReadingBackup)
+            } footer: {
+                Text("A library backup keeps your playlists, liked songs and detail edits. Keep separate copies of your audio files.").font(.caption).foregroundStyle(Theme.subdued)
+            }.font(.subheadline).listRowBackground(Theme.surface)
             Section {
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("MUSICCLOUD").font(.system(size: 11, weight: .bold)).tracking(3).foregroundStyle(Theme.accent)
-                    Text("Personal. Offline. Yours.").font(.subheadline)
-                    Text("No account, advertisements, or analytics. Wi-Fi transfer runs a temporary local server only when you start it. Only import music you have permission to copy.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—") · Build \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—")")
-                        .font(.caption2).foregroundStyle(Theme.subdued)
-                }.padding(.vertical, 8)
+                DisclosureGroup("Supported audio") {
+                    Text("MP3, M4A, AAC, WAV, AIFF, FLAC and CAF. Playback depends on the file’s codec and iOS support. Protected subscription downloads cannot be imported.")
+                        .font(.caption).foregroundStyle(Theme.subdued).padding(.vertical, 5)
+                }.font(.subheadline)
+                HStack {
+                    Image(systemName: "waveform").foregroundStyle(Theme.accent)
+                    Text("MusicCloud").font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Text("\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—") (\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"))")
+                        .font(.caption).foregroundStyle(Theme.subdued)
+                }.padding(.vertical, 5)
             }.listRowBackground(Theme.surface)
-        }
-        .scrollContentBackground(.hidden).background(Theme.background)
-        .navigationTitle("Transfer").navigationBarTitleDisplayMode(.inline)
-        .onDisappear { wifi.stop() }
-        .onChange(of: scenePhase) { phase in if phase == .background { wifi.stop() } }
-        .onChange(of: library.isLibraryProtected) { protected in if protected { wifi.stop() } }
-        .fileExporter(isPresented: $showExport, document: backupDocument, contentType: .json,
-            defaultFilename: "MusicCloud-playlists") { result in
+        }.scrollContentBackground(.hidden).background(Theme.background)
+            .navigationTitle("Transfer")
+            .onDisappear { wifi.stop() }
+            .onChange(of: scenePhase) { phase in if phase == .background { wifi.stop() } }
+            .onChange(of: library.isLibraryProtected) { protected in if protected { wifi.stop() } }
+            .fileImporter(isPresented: $showImport, allowedContentTypes: [.audio], allowsMultipleSelection: true) { result in
+                switch result { case .success(let urls): library.importFiles(urls); case .failure(let error): library.message = "Import was not completed: \(error.localizedDescription)" }
+            }
+            .fileExporter(isPresented: $showExport, document: backupDocument, contentType: .json, defaultFilename: "MusicCloud-library-backup") { result in
                 if case .failure(let error) = result { library.message = "Backup was not exported: \(error.localizedDescription)" }
             }
-        .fileImporter(isPresented: $showRestore, allowedContentTypes: [.json]) { result in
-            switch result {
-            case .success(let url):
-                isReadingBackup = true
-                Task {
-                    defer { isReadingBackup = false }
-                    do { pendingRestore = try await LibraryStore.readBackup(from: url) }
-                    catch { library.message = "Could not open backup: \(error.localizedDescription)" }
+            .fileImporter(isPresented: $showRestore, allowedContentTypes: [.json]) { result in
+                switch result {
+                case .success(let url):
+                    isReadingBackup = true
+                    Task {
+                        defer { isReadingBackup = false }
+                        do { pendingRestore = try await LibraryStore.readBackup(from: url) }
+                        catch { library.message = "Could not open backup: \(error.localizedDescription)" }
+                    }
+                case .failure(let error): library.message = "Backup was not opened: \(error.localizedDescription)"
                 }
-            case .failure(let error): library.message = "Backup was not opened: \(error.localizedDescription)"
             }
-        }
-        .confirmationDialog("Restore library backup?", isPresented: Binding(get: { pendingRestore != nil },
-            set: { if !$0 { pendingRestore = nil } }), titleVisibility: .visible) {
+            .confirmationDialog("Restore this library backup?", isPresented: Binding(get: { pendingRestore != nil }, set: { if !$0 { pendingRestore = nil } }), titleVisibility: .visible) {
                 if let data = pendingRestore {
-                    Button("Replace from backup", role: .destructive) {
+                    Button("Replace library from backup", role: .destructive) {
                         pendingRestore = nil
                         do { try library.restoreBackup(data) }
                         catch { library.message = "Could not restore backup: \(error.localizedDescription)" }
                     }
                 }
             } message: {
-                Text("This replaces favorites and playlists. A newer-format backup replaces all current song edits, even if it contains none; an older-format backup preserves current song edits. Audio files are not changed. Export your current library first if you want to keep it.")
+                Text("This replaces your playlists and liked songs. A newer-format backup also replaces song detail edits; older backups preserve them. Your audio files stay intact. Export a backup first to keep today’s changes.")
             }
     }
 }
@@ -142,33 +141,22 @@ struct TransferView: View {
 private struct PlaylistBackup: FileDocument {
     static let readableContentTypes: [UTType] = [.json]
     var data: Data
-
     init(data: Data) { self.data = data }
     init(configuration: ReadConfiguration) throws {
         guard let data = configuration.file.regularFileContents else { throw CocoaError(.fileReadCorruptFile) }
         self.data = data
     }
-    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        FileWrapper(regularFileWithContents: data)
-    }
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper { FileWrapper(regularFileWithContents: data) }
 }
 
-@MainActor
 private struct TransferStep: View {
     let number: String
     let title: String
     let detail: String
-
     var body: some View {
-        HStack(alignment: .top, spacing: 14) {
-            Text(number).font(.system(size: 14, weight: .bold, design: .rounded))
-                .foregroundStyle(Theme.background).frame(width: 28, height: 28).background(Theme.accent, in: Circle())
-            VStack(alignment: .leading, spacing: 7) {
-                Text(title).font(.subheadline.weight(.semibold))
-                Text(detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-        }.padding(.vertical, 8)
+        HStack(alignment: .top, spacing: 12) {
+            Text(number).font(.caption.weight(.bold)).foregroundStyle(Theme.accent).frame(width: 25, height: 25).background(Theme.accent.opacity(0.10), in: Circle())
+            VStack(alignment: .leading, spacing: 5) { Text(title).font(.subheadline.weight(.semibold)); Text(detail).font(.caption).foregroundStyle(Theme.subdued) }
+        }.padding(.vertical, 7)
     }
 }
-
-

@@ -25,10 +25,22 @@ struct LibraryArtworkStore: Sendable {
     private let pack: Data?
     private static let maximumImageBytes = 4 * 1024 * 1024
 
-    init(documentsURL: URL, legacyExportData: Data?) throws {
+    init(documentsURL: URL, legacyExportData: Data?, supplemental: [String: String] = [:]) throws {
         self.documentsURL = documentsURL.standardizedFileURL.resolvingSymlinksInPath()
         let snapshot = try legacyExportData.map { try LegacyExportSnapshot(data: $0) }
-        mapping = snapshot?.artworkByPath ?? [:]
+        var trackImages = snapshot?.artworkByPath ?? [:]
+        for playlist in snapshot?.playlists ?? [] {
+            for entry in playlist.entries {
+                if let path = entry.path, let reference = entry.artwork, trackImages[path] == nil {
+                    trackImages[path] = reference
+                }
+            }
+        }
+        for (path, reference) in supplemental {
+            let path = try LegacyRelativePath(path)
+            if trackImages[path] == nil { trackImages[path] = try LegacyRelativePath(reference) }
+        }
+        mapping = trackImages
         var playlistImages: [UUID: LegacyRelativePath] = [:]
         for playlist in snapshot?.playlists ?? [] {
             if let id = UUID(uuidString: playlist.id), let artwork = playlist.artwork { playlistImages[id] = artwork }

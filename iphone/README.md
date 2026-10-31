@@ -1,8 +1,8 @@
 # MusicCloud for iPhone
 
-**Version 1.7 · Build 8 · iOS 16 or later.** A native SwiftUI player for audio stored on your iPhone. Playback works offline after copying files. The source contains no music, private library fixtures, accounts, advertisements or analytics. Wi-Fi upload starts a temporary local server only when requested.
+**Version 1.8 · Build 9 · iOS 16 or later.** A native SwiftUI player for audio stored on your iPhone. Playback works offline after copying files. The source contains no music, private library fixtures, accounts, advertisements or analytics. Wi-Fi upload starts a temporary local server only when requested.
 
-The build produces an **unsigned IPA**, which requires device signing and installation. Version 1.7/build 8 was signed and installed over USB on an existing installation, retaining its effective bundle identifier, signing team and library data. Signing credentials and personal device evidence stay outside this repository.
+The build produces an **unsigned IPA**, which requires device signing and installation. The preceding version 1.7/build 8 was signed and installed over USB on an existing installation, retaining its effective bundle identifier, signing team and library data. Signing credentials and personal device evidence stay outside this repository.
 
 ## Build from Windows
 
@@ -13,6 +13,13 @@ Download the IPA to Windows and use your supported iPhone signing installer. Kee
 Free Apple development profiles expire after seven days. A refresh workflow renews them; it does not create a permanent free signature. Follow the official [AltStore Classic instructions](https://faq.altstore.io/altstore-classic) or [SideStore documentation](https://docs.sidestore.io/) for current installation and refresh requirements. Signing credentials are not included in this repository.
 
 On a macOS machine with Xcode, the shared project/scheme is `MusicCloud.xcodeproj` / `MusicCloud`. From the repository root, `bash iphone/build-unsigned.sh` packages `iphone/build/MusicCloud-unsigned.ipa` with signing disabled.
+
+## Version 1.8 changes
+
+- One Liked Songs collection receives hearts and imported likes. First launch combines recognized historical/prepared liked collections, keeps the original collection identity and occurrence order, repairs previously unavailable entries when the import supplies a local path, and deduplicates matching source IDs or exact paths. Ordinary playlists retain their entries and duplicates. A byte-exact `library-state-before-liked-merge.json` is kept before changing existing state; original source documents and all audio are preserved.
+- Artwork-led library and playlist views, a redesigned player, asynchronous thumbnail decoding/cache, cached catalog lookups and isolated playback progress updates avoid rebuilding the library on every clock tick.
+- Audio file opening and queue checkpoint validation/encoding/atomic writes run on serialized workers. User Pause, interruption, route-disconnect and superseded track requests gate playback, so late work cannot restart an old song. Audio session activation occurs only when playback is allowed.
+- A disposable metadata cache accelerates later scans; every cached record is matched against current path, file size and modification time. The cache never replaces playlist or audio data. Cover art remains available offline.
 
 ## Playback and editing
 
@@ -57,6 +64,7 @@ bash iphone/Migration/ProductionTests/run-checks.sh
 bash iphone/ArtworkTests/run-checks.sh
 bash iphone/WiFiUploadTests/run-checks.sh
 bash iphone/check-queue.sh
+bash iphone/check-playback-performance.sh
 bash iphone/build-unsigned.sh
 ```
 
@@ -65,3 +73,6 @@ These compile the implementation and use synthetic fixtures for model/schema han
 Separate physical iPhone checks verified the installed version and signing identity, retained rich playlist data and artwork, visible tab navigation, playlist playback origin, playback through a short Home-screen/background interval, and exact paused track/playlist/position recovery after a full process restart. A live local-network test loaded the upload page, rejected invalid tokens and foreign origins, uploaded generated silent WAV audio, and verified its phone checksum. The generated test file was removed after exact identity checks; existing upload files and saved library state stayed unchanged. Real incoming-call interruption and hardware lock-screen controls still require device testing; synthetic queue checks do not establish those behaviors.
 
 Before relying on an installed update, verify your playlist/favorite counts, missing records, artwork and edited metadata; restart to check persistence; test a duplicate-song queue and call interruption; then try a small Wi-Fi and USB transfer. Export a new backup and retain the original data until those checks pass.
+
+
+Version 1.8 physical-device validation is recorded after installation; the historical 1.7 results above do not establish playback quality for a newly compiled update. A full local decode of the verified 1,732-file audio backup passed before the 1.8 update. This checks the files, not Bluetooth hardware, source mastering quality or an incoming-call scenario.
