@@ -137,12 +137,12 @@ struct TransferView: View {
     }
 
     private var backupSection: some View {
-        Section("Keep a backup") {
+        Section {
             Button(action: exportBackup) { Label("Export library backup", systemImage: "square.and.arrow.up") }
             Button { showRestore = true } label: {
                 HStack { Label("Restore library backup", systemImage: "arrow.counterclockwise"); Spacer(); if isReadingBackup { ProgressView() } }
             }.disabled(isReadingBackup)
-        } footer: {
+        } header: { Text("Keep a backup") } footer: {
             Text("A library backup keeps your playlists, liked songs and detail edits. Keep separate copies of your audio files.").font(.caption).foregroundStyle(Theme.subdued)
         }.font(.subheadline).listRowBackground(Theme.surface)
     }
