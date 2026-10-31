@@ -403,6 +403,24 @@ final class LibraryStore: ObservableObject {
         commit(candidate)
     }
 
+    /// Reorders only user playlists, keeping the canonical Liked Songs
+    /// collection protected while preserving the visible list order.
+    func movePlaylists(from source: IndexSet, to destination: Int) {
+        guard requireWritableLibrary() else { return }
+        let visible = state.playlists.filter { $0.id != likedPlaylistID }
+        guard source.allSatisfy({ visible.indices.contains($0) }), (0...visible.count).contains(destination) else { return }
+        var reordered = visible
+        reordered.move(fromOffsets: source, toOffset: destination)
+
+        var candidate = state
+        var cursor = 0
+        for index in candidate.playlists.indices where candidate.playlists[index].id != likedPlaylistID {
+            candidate.playlists[index] = reordered[cursor]
+            cursor += 1
+        }
+        commit(candidate)
+    }
+
     func deletePlaylist(id: UUID) {
         guard requireWritableLibrary() else { return }
         guard id != likedPlaylistID else { return }
@@ -795,5 +813,6 @@ private enum StoreError: LocalizedError {
         }
     }
 }
+
 
 

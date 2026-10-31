@@ -16,6 +16,8 @@ struct PlaylistsView: View {
     @State private var showCreate = false
     @State private var playlistName = ""
     @State private var deletingID: UUID?
+    @State private var renamingID: UUID?
+    @State private var renameName = ""
     @State private var createdID: UUID?
     @State private var cards: [PlaylistCardSnapshot] = []
     @State private var filtered: [PlaylistCardSnapshot] = []
@@ -45,13 +47,26 @@ struct PlaylistsView: View {
                         }.padding(.vertical, 7)
                     }.musicSongListRow()
                         .swipeActions { Button("Delete", role: .destructive) { deletingID = card.id } }
+                        .contextMenu {
+                            Button { renameName = card.name; renamingID = card.id } label: {
+                                Label("Rename playlist", systemImage: "pencil")
+                            }
+                            Button(role: .destructive) { deletingID = card.id } label: {
+                                Label("Delete playlist", systemImage: "trash")
+                            }
+                        }
+                }
+                .onMove { source, destination in
+                    guard query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                    library.movePlaylists(from: source, to: destination)
                 }
             } header: { MusicSectionHeading(title: "Your playlists", count: cards.count).padding(.vertical, 6) }
         }.listStyle(.plain).scrollContentBackground(.hidden).background(Theme.background)
             .navigationTitle("Playlists")
             .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Find a playlist")
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    EditButton().font(.subheadline).disabled(cards.isEmpty || !query.isEmpty || library.isLibraryProtected)
                     Button { playlistName = ""; showCreate = true } label: {
                         Image(systemName: "plus").font(.body.weight(.semibold)).frame(width: 40, height: 40).background(Theme.surface, in: Circle())
                     }.accessibilityLabel("Create playlist")
@@ -61,6 +76,14 @@ struct PlaylistsView: View {
                 TextField("Playlist name", text: $playlistName)
                 Button("Create") { createdID = library.createPlaylist(name: playlistName); playlistName = "" }
                 Button("Cancel", role: .cancel) { playlistName = "" }
+            }
+            .alert("Rename playlist", isPresented: Binding(get: { renamingID != nil }, set: { if !$0 { renamingID = nil } })) {
+                TextField("Playlist name", text: $renameName)
+                Button("Save") {
+                    if let id = renamingID { library.renamePlaylist(id: id, name: renameName) }
+                    renamingID = nil
+                }
+                Button("Cancel", role: .cancel) { renamingID = nil }
             }
             .navigationDestination(isPresented: Binding(get: { createdID != nil }, set: { if !$0 { createdID = nil } })) {
                 if let id = createdID { PlaylistDetailView(playlistID: id) }
@@ -111,6 +134,7 @@ struct PlaylistDetailView: View {
     @State private var showRename = false
     @State private var updatedName = ""
     @State private var query = ""
+    @State private var showMissingOnly = false
     @State private var rows: [PlaylistRowOccurrence] = []
     @State private var visibleRows: [PlaylistRowOccurrence] = []
     @State private var tracks: [Track] = []
@@ -131,6 +155,10 @@ struct PlaylistDetailView: View {
                                 Text(canonical ? "SAVED MUSIC" : "PLAYLIST").font(.system(size: 10, weight: .bold)).tracking(1.5).foregroundStyle(Theme.accent)
                                 Text(canonical ? "Liked Songs" : playlist.name).font(.system(size: 25, weight: .bold)).lineLimit(3)
                                 Text("\(tracks.count) on iPhone · \(rows.count) saved").font(.caption).foregroundStyle(Theme.subdued)
+                                if rows.count > tracks.count {
+                                    Text("\(rows.count - tracks.count) saved without audio on this iPhone")
+                                        .font(.caption2).foregroundStyle(Theme.accent.opacity(0.9))
+                                }
                                 Text(totalDuration.musicTime + " of music").font(.caption2).foregroundStyle(Theme.subdued)
                             }.frame(maxWidth: .infinity, alignment: .leading)
                         }.padding(.top, 12).padding(.bottom, 14)
@@ -186,6 +214,17 @@ struct PlaylistDetailView: View {
             .toolbar {
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
                     Button { showAdd = true } label: { Image(systemName: "plus").frame(width: 32, height: 40) }.accessibilityLabel("Add songs")
+                    Menu {
+                        Button { showMissingOnly = false } label: {
+                            Label("All saved songs", systemImage: showMissingOnly ? "line.3.horizontal.decrease.circle" : "checkmark")
+                        }
+                        Button { showMissingOnly = true } label: {
+                            Label("Missing from iPhone", systemImage: showMissingOnly ? "checkmark" : "icloud.slash")
+                        }
+                    } label: {
+                        Image(systemName: showMissingOnly ? "icloud.slash.fill" : "line.3.horizontal.decrease.circle")
+                            .frame(width: 32, height: 40)
+                    }.accessibilityLabel(showMissingOnly ? "Showing songs missing from iPhone" : "Filter playlist songs")
                     EditButton().font(.subheadline).disabled(rows.isEmpty || library.isLibraryProtected)
                     if !canonical {
                         Menu { Button("Rename playlist") { updatedName = playlist?.name ?? ""; showRename = true } }
@@ -201,6 +240,7 @@ struct PlaylistDetailView: View {
             }
             .onAppear { reload() }.onChange(of: library.catalogRevision) { _ in reload() }
             .onChange(of: query) { _ in filterRows() }
+            .onChange(of: showMissingOnly) { _ in filterRows() }
     }
 
     private func reload() {
@@ -234,7 +274,9 @@ struct PlaylistDetailView: View {
     }
     private func filterRows() {
         let key = query.trimmingCharacters(in: .whitespacesAndNewlines).musicSortKey
-        visibleRows = key.isEmpty ? rows : rows.filter { $0.searchKey.contains(key) }
+        visibleRows = rows.filter { row in
+            (!showMissingOnly || row.track == nil) && (key.isEmpty || row.searchKey.contains(key))
+        }
     }
     private func removeRows(_ offsets: IndexSet) {
         guard let current = playlist else { return }
@@ -270,6 +312,7 @@ private struct AddSongsView: View {
                     ForEach(tracks) { track in
                         let selected = selectedIDs.contains(track.id)
                         Button {
+                            if selected { selectedIDs.remove(track.id) } else { selectedIDs.insert(track.id) }
                             if canonical { library.toggleLike(track) }
                             else if selected { library.removeTrack(id: track.id, from: playlistID) }
                             else { library.add(track, to: playlistID) }
@@ -300,3 +343,4 @@ private struct AddSongsView: View {
         tracks = snapshot.matching(query)
     }
 }
+
