@@ -15,6 +15,7 @@ final class LibraryStore: ObservableObject {
     @Published private(set) var lastScanSucceeded = false
     @Published private(set) var isLibraryProtected = false
     @Published private(set) var catalogRevision = 0
+    @Published private(set) var tracksRevision = 0
 
     nonisolated static let extensions: Set<String> = ["mp3", "m4a", "aac", "wav", "aif", "aiff", "flac", "caf"]
     let documentsURL: URL
@@ -248,6 +249,7 @@ final class LibraryStore: ObservableObject {
             return lhs == rhs ? $0.id < $1.id : lhs < rhs
         }
         rebuildIndexes()
+        tracksRevision &+= 1
     }
 
     private func rebuildIndexes() {
@@ -283,14 +285,8 @@ final class LibraryStore: ObservableObject {
         edits[id] = TrackMetadataOverride(title: values[0], artist: values[1], album: values[2])
         var candidate = state
         candidate.trackOverrides = edits
-        for index in candidate.playlists.indices {
-            guard var entries = candidate.playlists[index].entries else { continue }
-            for entryIndex in entries.indices where entries[entryIndex].trackID == id {
-                entries[entryIndex].title = values[0]
-                entries[entryIndex].artist = values[1]
-            }
-            setEntries(entries, at: index, in: &candidate)
-        }
+        // A path override changes display only. Keep each playlist occurrence's
+        // saved source text, so Reset does not flatten distinct imported titles.
         guard commit(candidate) else { return false }
         applyMetadataOverrides()
         return true
@@ -300,16 +296,27 @@ final class LibraryStore: ObservableObject {
     func resetMetadata(id: String) -> Bool {
         guard requireWritableLibrary() else { return false }
         var edits = state.trackOverrides ?? [:]
-        edits.removeValue(forKey: id)
+        let previousEdit = edits.removeValue(forKey: id)
         var candidate = state
         candidate.trackOverrides = edits
-        if let original = scannedTracks.first(where: { $0.id == id }) {
+        if let previousEdit, let original = scannedTracks.first(where: { $0.id == id }) {
             let detail = (try? LegacyRelativePath(id)).flatMap { importedDetails[$0] }
             for index in candidate.playlists.indices {
                 guard var entries = candidate.playlists[index].entries else { continue }
                 for entryIndex in entries.indices where entries[entryIndex].trackID == id {
-                    entries[entryIndex].title = detail?.title ?? original.title
-                    entries[entryIndex].artist = detail?.artist ?? original.artist
+                    // Older builds copied the override into entries too.
+                    // Recover only those matching copies from their retained
+                    // source object; leave already preserved occurrence text.
+                    guard entries[entryIndex].title == previousEdit.title,
+                        entries[entryIndex].artist == previousEdit.artist else { continue }
+                    var sourceTitle: String?
+                    var sourceArtist: String?
+                    if case .object(let raw)? = entries[entryIndex].legacyData {
+                        if case .string(let value)? = raw["title"] { sourceTitle = value }
+                        if case .string(let value)? = raw["artist"] { sourceArtist = value }
+                    }
+                    entries[entryIndex].title = sourceTitle ?? detail?.title ?? original.title
+                    entries[entryIndex].artist = sourceArtist ?? detail?.artist ?? original.artist
                 }
                 setEntries(entries, at: index, in: &candidate)
             }

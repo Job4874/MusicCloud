@@ -209,10 +209,11 @@ struct PlaylistDetailView: View {
         var nextTracks: [Track] = []
         if let entries = playlist.entries {
             for (offset, entry) in entries.enumerated() {
-                let track = entry.trackID.flatMap { library.track(id: $0) }
+                let track = library.track(for: entry)
                 nextRows.append(PlaylistRowOccurrence(id: .entry(entry.id), sourceOffset: offset, trackID: entry.trackID,
                     title: entry.title, artist: entry.artist, status: entry.status, artwork: library.artwork(for: entry), track: track,
-                    playbackIndex: track == nil ? nil : nextTracks.count, searchKey: (entry.title + " " + entry.artist).musicSortKey))
+                    playbackIndex: track == nil ? nil : nextTracks.count,
+                    searchKey: (entry.title + " " + entry.artist + " " + (track?.searchableText ?? "")).musicSortKey))
                 if let track { nextTracks.append(track) }
             }
         } else {

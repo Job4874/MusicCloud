@@ -29,7 +29,7 @@ struct RootView: View {
                         Button("OK", role: .cancel) { playback.errorMessage = nil }
                     } message: { Text(playback.errorMessage ?? "") }
                     .task { if library.lastScan == nil { library.rescan() } }
-                    .onChange(of: library.catalogRevision) { _ in
+                    .onChange(of: library.tracksRevision) { _ in
                         guard library.lastScanSucceeded else { return }
                         playback.restoreIfNeeded(with: library.tracks)
                         playback.reconcile(with: library.tracks)
